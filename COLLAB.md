@@ -67,7 +67,12 @@
 2. **代码文件**（mcp_server.py / session_log.py 等）：确认无敏感后可直接同步
 3. **内部信息文件**（cyber_brain.py / web_ui.py / README.md）：**增量补丁**——只在 repo 版基础上加新功能/新章节，绝不整体覆盖
 4. **发布前全仓扫描**：`grep -rnE "C:/Users|WorkBuddy|内部技能名|客户名" repo/` 确认零残留
-5. **提交后打卡**：`session_log.py "GitHub 发布 vX.X：..."` 留痕
+5. **提交 + 版本化发布**（不直接 push master，走 tag + Release）：
+   - commit → `git push origin master`
+   - 打 tag：`git tag vX.Y.Z`（语义化：新功能 minor，修 bug patch）→ `git push origin vX.Y.Z`
+   - 建 Release（gh CLI）：`gh release create vX.Y.Z --target master --title "Huiran-cerebro vX.Y.Z" --notes "更新说明"`
+   - Release 会自动标记 Latest，旧版本保留可追溯
+6. **提交后打卡**：`session_log.py "GitHub 发布 vX.Y.Z：..."` 留痕
 
 ## 五、当你看到这份文件时
 
