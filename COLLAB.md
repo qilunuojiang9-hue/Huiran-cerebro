@@ -56,6 +56,18 @@
 - ❌ 把临时调试结果写入 kb_document——用 `content --add ctype=note` 即可
 - ❌ 删除 / 覆盖用户已有记忆——除非用户明确说"删"且有备份
 - ❌ 推 git 时携带客户台账等敏感数据——公开仓库必须脱敏后再发布
+- ❌ **直接 `cp 工作区文件 repo/` 覆盖发布仓库**——`repo/` 是脱敏发布版，与工作目录已分叉：
+  - `cyber_brain.py` / `web_ui.py` 工作区版含内部流水线指引（绝对路径、内部技能名、客户示例）
+  - README.md 工作区版是内部版（三源融合/客户台账），repo 版是对外开源介绍
+  - 覆盖 = 把内部信息公开到 GitHub（不可逆！）
+
+## 四·五、发布到 GitHub 的正确姿势（2026-09-10 落地）
+
+1. **先 diff 再动**：`git -C repo diff HEAD -- <file>` 看 repo 版与 HEAD 的差异，判断哪些是本次更新该发布的
+2. **代码文件**（mcp_server.py / session_log.py 等）：确认无敏感后可直接同步
+3. **内部信息文件**（cyber_brain.py / web_ui.py / README.md）：**增量补丁**——只在 repo 版基础上加新功能/新章节，绝不整体覆盖
+4. **发布前全仓扫描**：`grep -rnE "C:/Users|WorkBuddy|内部技能名|客户名" repo/` 确认零残留
+5. **提交后打卡**：`session_log.py "GitHub 发布 vX.X：..."` 留痕
 
 ## 五、当你看到这份文件时
 
