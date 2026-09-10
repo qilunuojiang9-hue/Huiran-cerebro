@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/版本-v1.2.0-4B8BF5" alt="version">
+  <img src="https://img.shields.io/badge/版本-v1.3.0-4B8BF5" alt="version">
   <img src="https://img.shields.io/badge/语言-Python%203.10%2B-3776AB" alt="python">
   <img src="https://img.shields.io/badge/许可证-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/数据库-SQLite%20%2B%20FTS5%20trigram-blue" alt="db">
@@ -193,6 +193,16 @@ requirements.txt        # 依赖
 docs/                   # 文档与架构图（architecture.svg）
 tools/                  # 测试与工具脚本
 ```
+
+---
+
+## 关于本仓库
+
+> ⚠️ **本仓库发布的是源码框架，不含任何实际数据。**
+
+- **不含个人数据**：`cyber_brain.db`（知识库文档、记忆碎片、实体关系、向量索引）已列入 `.gitignore`，克隆后需要自行初始化、自行灌入内容。README 或简历中出现的「598 篇文档 / 5,786 分块 / 6,060 条向量 / 139 条记忆碎片 / 33 个实体」等规模数字，均来自作者**本机实例的实测值**，用于说明系统承载量，**并非仓库自带内容**。
+- **已做脱敏**：原版中作者所在公司的内部流水线指引、本机绝对路径等已统一替换为占位注释（如 `cyber_brain.py` 的「流水线固定指引」→「用户自定义每日指引」），功能逻辑与对外接口保持一致。
+- **隐私设计**：默认本地运行，数据不出本机；仅在接入云端模型时才发起外部请求。
 
 ---
 
