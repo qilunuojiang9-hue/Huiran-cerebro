@@ -1,5 +1,18 @@
 # Huiran-cerebro · 赛博大脑
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Huiran-cerebro 架构图" width="100%">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/版本-v1.2.0-4B8BF5" alt="version">
+  <img src="https://img.shields.io/badge/语言-Python%203.10%2B-3776AB" alt="python">
+  <img src="https://img.shields.io/badge/许可证-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/数据库-SQLite%20%2B%20FTS5%20trigram-blue" alt="db">
+  <img src="https://img.shields.io/badge/语义检索-bge--small--zh--v1.5-orange" alt="embedding">
+  <img src="https://img.shields.io/badge/MCP-%E8%B1%86%E5%8C%85%E5%85%BC%E5%AE%B9-7B3FE4" alt="mcp">
+</p>
+
 个人/团队记忆中枢与知识库引擎。单文件 SQLite，零服务依赖，融合了「知识库 RAG + 记忆碎片 + 实体关系 + AI 检索」四层能力，可作 AI 助手的外接记忆（支持 MCP，已适配豆包等客户端）。
 
 > **一句话**：把 AI 的「记忆」和「知识」沉淀成本地可检索、可对话的私有知识库。
@@ -163,6 +176,7 @@ daily_brief.py          # 每日开工上下文生成
 doctor.py               # 环境自检（--fix 自动修）
 COLLAB.md               # AI 协作规约（开工 recall / 任务打卡 / 来源标记）
 requirements.txt        # 依赖
+docs/                   # 文档与架构图（architecture.svg）
 tools/                  # 测试与工具脚本
 ```
 
