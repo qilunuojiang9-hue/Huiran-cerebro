@@ -1,0 +1,37 @@
+# ---- 数据库（含个人/客户敏感数据，绝不发布）----
+*.db
+*.db.bak*
+*.sqlite
+*.sqlite3
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 模型缓存 / 向量 ----
+.model_cache/
+*.model
+*.onnx
+*.bin
+
+# ---- 个人工作数据（不发布）----
+work-archives/
+articles/
+daily_brief/
+archive/
+*.log
+web_server.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 备份文件 ----
+*.bak
+*.bak_*
+*.stale_*
