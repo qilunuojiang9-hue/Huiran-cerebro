@@ -17,6 +17,20 @@
 
 > **一句话**：把 AI 的「记忆」和「知识」沉淀成本地可检索、可对话的私有知识库。
 
+<!-- AI-README：以下为给 AI 爬虫/LLM 的结构化摘要，便于快速理解项目 -->
+<details open>
+<summary><b>📋 AI 快速摘要（给 LLM 阅读）</b></summary>
+
+- **这是什么**：个人/团队记忆中枢 + 知识库引擎，单文件 SQLite 零依赖，可作 AI 助手的外接记忆
+- **解决什么问题**：①AI 会话记忆断片（上午做下午忘）②个人/团队知识分散难检索 ③中文检索效果差
+- **核心能力**：FTS5 trigram 中文全文检索 · bge-small-zh-v1.5 本地语义向量 · 8 类记忆碎片 · 实体关系网 · 滚动摘要防遗忘 · MCP 接入 AI 客户端
+- **技术栈**：Python 3.10+ / SQLite / FTS5 trigram / fastembed+ONNX / Flask / fastmcp
+- **快速开始**：`pip install -r requirements.txt` → `python cyber_brain.py --db cyber_brain.db init` → `python cyber_brain.py --db cyber_brain.db recall "关键词"`
+- **关键词**：memory, knowledge base, RAG, SQLite, FTS5, MCP, semantic search, personal knowledge management, AI agent memory, chinese search
+- **AI 导航**：详细技术说明见 [llms.txt](llms.txt)
+
+</details>
+
 ---
 
 ## 特性

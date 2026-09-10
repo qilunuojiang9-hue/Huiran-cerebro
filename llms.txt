@@ -1,0 +1,80 @@
+# Huiran-cerebro
+
+> AI 可读的项目导航（llms.txt 规范）。人类读者请看 [README.md](README.md)。
+
+## 项目一句话
+
+Huiran-cerebro（赛博大脑）是一个**个人/团队记忆中枢与知识库引擎**：单文件 SQLite 存储，零服务依赖，融合知识库 RAG、记忆碎片、实体关系与 AI 检索四层能力，可作 AI 助手（豆包/Claude/WorkBuddy 等）的外接记忆。
+
+## 核心能力
+
+- **单文件存储**：SQLite 单库 `cyber_brain.db`，备份 = 拷文件，换机零迁移
+- **中文检索优化**：FTS5 `trigram` 分词，中文按 3 字滑窗，≥3 字走全文索引、<3 字自动回退 LIKE
+- **语义检索**：本地 `BAAI/bge-small-zh-v1.5` 向量（fastembed + ONNX Runtime，离线可用）
+- **四层数据模型**：
+  - `content_item` — 内容实体（笔记/文章/任务/决策）
+  - `kb_document/kb_chunk` — RAG 知识库（自动分块、向量检索）
+  - `memory_fragments` — 记忆碎片（fact/preference/emotion/knowledge/decision/iron_rule/event/pitfall 8 类）
+  - `entity/entity_link` — 实体关系网（人/组织/项目/账号/平台/产品）
+- **记忆防遗忘**：`recall` 带回滚动摘要 + 记忆碎片 + 关联实体，长会话开工即带上文
+- **会话自动打卡**：`session_log.py` 一句话记录「干了什么」，自动分类 + 判重，解决「上午做下午忘」
+- **MCP 服务器**：暴露为标准 MCP 工具，可接入豆包等支持 MCP 的 AI 客户端（6 工具 + session_log_tool）
+
+## 技术栈
+
+| 组件 | 技术 |
+|---|---|
+| 存储 | SQLite（单文件）+ FTS5 trigram |
+| 语义向量 | fastembed + ONNX Runtime（bge-small-zh-v1.5, 512 维） |
+| Web 界面 | Flask（搜索/录入/浏览/实体图/AI 问答/今日看板） |
+| MCP | fastmcp 4.x（streamable HTTP，127.0.0.1:8765/mcp） |
+| 语言 | Python 3.10+ |
+
+## 快速开始
+
+```bash
+pip install -r requirements.txt
+
+# 初始化建库
+python cyber_brain.py --db cyber_brain.db init
+
+# 写入记忆碎片
+python cyber_brain.py --db cyber_brain.db frag --add --type fact --content "今天是周五" --subject work
+
+# 检索（语义 + 全文）
+python cyber_brain.py --db cyber_brain.db recall "今天"
+python cyber_brain.py --db cyber_brain.db search "关键词"
+
+# 会话打卡
+python session_log.py "完成了什么工作"
+
+# 启动 Web（http://127.0.0.1:8899）
+python web_ui.py
+
+# 启动 MCP（http://127.0.0.1:8765/mcp）
+python mcp_server.py
+```
+
+## 关键文件
+
+- [README.md](README.md) — 完整文档
+- [MCP接入豆包指南.md](MCP%E6%8E%A5%E5%85%A5%E8%B1%86%E5%8C%85%E6%8C%87%E5%8D%97.md) — MCP 接入教程
+- [COLLAB.md](COLLAB.md) — AI 协作规约
+- [docs/architecture.svg](docs/architecture.svg) — 架构图
+- `cyber_brain.py` — 核心引擎
+- `web_ui.py` — Web 界面
+- `mcp_server.py` — MCP 服务器
+- `session_log.py` — 会话自动打卡
+- `tools/` — 测试与工具脚本
+
+## 典型使用场景
+
+1. **AI 外接记忆**：把豆包/Claude 的记忆接到本地库，长会话不丢失上下文
+2. **个人知识库**：笔记/文章/决策统一入库，语义检索 + 全文检索双通道
+3. **团队协作记忆**：铁律/踩坑/客户台账集中管理，开工上下文一键带出
+4. **AI 记忆研究/教学**：演示「知识库 RAG + 记忆碎片 + 实体关系」完整架构
+
+## 参考资源
+
+- [llms.txt 规范](https://llmstxt.org/) — 本项目 llms.txt 遵循此规范
+- [Anthropic 文档最佳实践](https://www.anthropic.com/news/writing-prompt-for-ai-docs)
