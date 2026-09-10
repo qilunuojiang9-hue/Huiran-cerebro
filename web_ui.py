@@ -381,7 +381,28 @@ def api_ask():
 
 @app.get("/api/daily")
 def api_daily():
-    return jsonify(_run(db.daily_context))
+    """今日工作看板：返回今日 event 碎片 + 工作日志 + 待办发布（结构化）"""
+    import datetime
+    today = datetime.date.today().isoformat()
+    events = db.con.execute(
+        "SELECT id, content, created_at FROM memory_fragments "
+        "WHERE fragment_type='event' AND created_at LIKE ? ORDER BY id DESC",
+        (today + "%",)).fetchall()
+    logs = db.con.execute(
+        "SELECT id, title, body, category, updated_at FROM content_item "
+        "WHERE (category IN ('发布记录','踩坑','完成事项','工作日志') OR category IS NULL) "
+        "AND updated_at LIKE ? ORDER BY updated_at DESC LIMIT 30",
+        (today + "%",)).fetchall()
+    pending = db.con.execute(
+        "SELECT title FROM content_item WHERE category='发布记录' AND status!='done' "
+        "ORDER BY updated_at DESC LIMIT 10").fetchall()
+    return jsonify({
+        "date": today,
+        "events": [dict(r) for r in events],
+        "logs": [dict(r) for r in logs],
+        "pending": [r["title"] for r in pending],
+        "context": _run(db.daily_context),
+    })
 
 
 @app.post("/api/add")
@@ -755,7 +776,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 </header>
 
 <div class="searchbar">
-  <input id="q" placeholder="搜什么？例如：收款 / 企鹅号 / 选题 / 发布红线 / 德孚润滑油" onkeydown="if(event.key==='Enter')doSearch()">
+  <input id="q" placeholder="搜什么？例如：收款 / 平台 / 选题 / 发布红线 / 客户名" onkeydown="if(event.key==='Enter')doSearch()">
   <input id="ns" placeholder="命名空间(可选: 默认 default)" style="max-width:180px" title="多项目隔离：只搜某个命名空间">
   <button class="btn blue" onclick="doSearch()">搜索</button>
   <button class="btn amber" onclick="doRecall()">回忆（防遗忘）</button>
@@ -774,6 +795,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="tab" data-tab="graph" onclick="switchTab('graph')">关系图谱</div>
   <div class="tab" data-tab="ask" onclick="switchTab('ask')">AI 问答</div>
   <div class="tab" data-tab="conflict" onclick="switchTab('conflict')">冲突检测</div>
+  <div class="tab" data-tab="today" onclick="switchTab('today')">今日</div>
 </div>
 
 <div id="panel-search" class="panel">
@@ -867,7 +889,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="card">
     <label>按名称查实体（支持模糊，回车搜索）</label>
     <div class="form-row">
-      <div style="flex:3"><input id="relQ" placeholder="如：汉全科技 / 德孚 / 慕思" onkeydown="if(event.key==='Enter')searchEntity()"></div>
+      <div style="flex:3"><input id="relQ" placeholder="如：公司名 / 客户名 / 产品名" onkeydown="if(event.key==='Enter')searchEntity()"></div>
       <div style="flex:1"><button class="btn blue" onclick="searchEntity()">查实体</button></div>
     </div>
     <div id="relMatches" style="margin-top:8px"></div>
@@ -892,7 +914,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 <div id="panel-ask" class="panel hidden">
   <div class="card">
     <h3>AI 问答 <span class="n">RAG · 检索增强</span></h3>
-    <div class="hint">直接对赛博大脑提问，例如「我们给慕思定过什么红线？」「汉全出海服务哪些客户？」「发布铁律是什么？」。答案由火山方舟 LLM 基于库内记忆/文档生成。</div>
+    <div class="hint">直接对赛博大脑提问，例如「我们给某客户定过什么红线？」「最近服务哪些客户？」「发布铁律是什么？」。答案由 LLM 基于库内记忆/文档生成。</div>
     <div class="form-row">
       <div style="flex:3"><input id="askQ" placeholder="问赛博大脑一个问题…" onkeydown="if(event.key==='Enter')askBrain()"></div>
       <div style="flex:1"><button class="btn violet" onclick="askBrain()">提问</button></div>
@@ -909,6 +931,17 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
       <div style="flex:1"><button class="btn amber" onclick="scanConflicts()">扫描冲突</button></div>
     </div>
     <div id="conflictRes" style="margin-top:12px"><div class="empty">点击「扫描冲突」检查记忆是否打架</div></div>
+  </div>
+</div>
+
+<div id="panel-today" class="panel hidden">
+  <div class="card">
+    <h3>今日工作 <span class="n" id="todayDate"></span></h3>
+    <div class="hint">当天的工作打卡记录。工作告一段落后，让 AI 跑 <code>session_log.py "干了什么"</code> 自动打卡，下午/明天开工即可接上。</div>
+    <div class="form-row">
+      <div style="flex:1"><button class="btn" onclick="loadToday()">刷新</button></div>
+    </div>
+    <div id="todayRes" style="margin-top:12px"><div class="empty">加载中…</div></div>
   </div>
 </div>
 
@@ -975,6 +1008,52 @@ function switchTab(name){
   $('panel-'+name).classList.remove('hidden');
   if(name==='browse'){loadStats();loadList('content');}
   if(name==='graph'){loadGraph();}
+  if(name==='today'){loadToday();}
+}
+
+/* ============ 今日工作看板 ============ */
+function loadToday(){
+  const box=$('todayRes'); if(!box) return;
+  box.innerHTML='<div class="empty">加载中…</div>';
+  fetch('/api/daily').then(r=>r.json()).then(d=>{
+    $('todayDate').textContent='· '+d.date;
+    let html='';
+    if(d.events && d.events.length){
+      html+='<div class="hint" style="margin:10px 0 4px">📌 今日打卡碎片（'+d.events.length+'）</div>';
+      html+='<div style="display:flex;flex-direction:column;gap:8px">';
+      d.events.forEach(e=>{
+        const t=(e.created_at||'').slice(11,16);
+        html+='<div class="item" style="display:flex;gap:10px;align-items:flex-start">'
+          +'<span class="pill" style="flex:0 0 auto;margin-top:2px">'+t+'</span>'
+          +'<div class="b">'+md(e.content||'')+'</div></div>';
+      });
+      html+='</div>';
+    }
+    if(d.logs && d.logs.length){
+      html+='<div class="hint" style="margin:14px 0 4px">📂 今日工作日志（'+d.logs.length+'）</div>';
+      html+='<div style="display:flex;flex-direction:column;gap:8px">';
+      d.logs.forEach(l=>{
+        const t=(l.updated_at||'').slice(11,16);
+        html+='<div class="item" style="display:flex;gap:10px;align-items:flex-start">'
+          +'<span class="pill" style="flex:0 0 auto;margin-top:2px">'+t+'</span>'
+          +'<div><div class="b">'+esc(l.title||'')+'</div>'
+          +'<div class="ts" style="margin-top:2px">'+md((l.body||'').slice(0,200))+'</div></div></div>';
+      });
+      html+='</div>';
+    }
+    if(!d.events.length && !d.logs.length){
+      html+='<div class="empty">今天还没有打卡记录。<br>工作告一段落后，让 AI 跑 <code>session_log.py "干了什么"</code> 自动打卡。</div>';
+    }
+    if(d.pending && d.pending.length){
+      html+='<div class="hint" style="margin:14px 0 4px">⏳ 未完成发布</div>';
+      html+='<div style="display:flex;flex-direction:column;gap:6px">'+d.pending.map(p=>'<div class="item"><span class="pill amber">待发</span> '+esc(p)+'</div>').join('')+'</div>';
+    }
+    if(d.context && d.context.length){
+      html+='<details style="margin-top:14px"><summary class="hint" style="cursor:pointer">📋 今日开工上下文（daily_brief）</summary>'
+        +'<pre style="white-space:pre-wrap;font-size:12px;line-height:1.7;max-height:360px;overflow:auto;margin-top:8px">'+esc(d.context.join('\n'))+'</pre></details>';
+    }
+    box.innerHTML=html;
+  }).catch(e=>{box.innerHTML='<div class="empty">加载失败 '+esc(e)+'</div>';});
 }
 function switchAdd(kind){
   document.querySelectorAll('#addTabs .ltab').forEach(t=>t.classList.toggle('on',t.dataset.kind===kind));

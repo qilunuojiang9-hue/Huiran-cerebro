@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fastmcp import FastMCP  # fastmcp 4.x 独立包
 
 from cyber_brain import CyberBrain
+import session_log  # 复用 session_log.py 的核心逻辑（避免重复）
 
 # ---------------------------------------------------------------- 基础
 DB_PATH = os.environ.get("CYBER_BRAIN_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cyber_brain.db"))
@@ -122,6 +123,8 @@ def add_memory(
         tags: 逗号分隔标签，如 "汉全,获客"。
         entities: 逗号分隔关联实体名，如 "汉全科技,刘力"。
         source_ref: 来源（默认 mcp-doubao，可写 doubao-export 等）。
+
+    提示（豆包端）：用 ftype=event + content="今天做了..." 可等价于 session_log 打卡。
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     ent_list = [e.strip() for e in entities.split(",") if e.strip()] if entities else None
@@ -200,6 +203,32 @@ def entity(q: str = "", mode: str = "search", eid: int = 0, limit: int = 20) -> 
     return {"entities": _rows_to_dicts(b.search_entities(q, limit=limit))}
 
 
+# ---------------------------------------------------------------- 工具 7：会话自动打卡
+@mcp.tool()
+def session_log_tool(
+    text: str = "",
+    action: str = "log",
+    limit: int = 10,
+) -> dict:
+    """会话自动打卡（防「上午做下午忘」）—— 写入/查询工作记录。
+
+    Args:
+        text: 打卡文字（action=log 时必填；30-100 字，含动作+对象+产出）。
+        action: log 打卡（默认）/ today 列出今日 / recent 列出最近。
+        limit: recent 模式返回条数（默认 10）。
+    """
+    if action == "today":
+        return {"date": __import__("datetime").date.today().isoformat(),
+                "events": session_log.today()}
+    if action == "recent":
+        return {"limit": limit, "events": session_log.recent(limit=limit)}
+    if action == "log":
+        if not text or not text.strip():
+            return {"ok": False, "error": "text 不能为空"}
+        return session_log.log(text.strip())
+    return {"ok": False, "error": f"unknown action: {action}"}
+
+
 # ---------------------------------------------------------------- 入口
 def main():
     parser = argparse.ArgumentParser(description="赛博大脑 MCP 服务器")
@@ -213,7 +242,10 @@ def main():
     print(f"  地址:   http://{args.host}:{args.port}/mcp")
     print(f"  传输:   HTTP（streamable HTTP）")
     print("  工具:   recall / search / add_memory / add_content /")
-    print("          stats / entity")
+    print("          stats / entity / session_log_tool")
+    print("  注:    豆包上限 6 工具，会自动忽略第 7 个 session_log_tool；")
+    print("        豆包端请用 add_memory(ftype='event', content=...) 等价打卡")
+    print("        WorkBuddy/Claude 等无限工具的客户端可正常调用 session_log_tool")
     print("  豆包连接: 自定义连接器 → 服务器名称 cyber-brain → 传输类型 HTTP")
     print(f"          → 服务器 URL http://{args.host}:{args.port}/mcp")
     print("=" * 60)

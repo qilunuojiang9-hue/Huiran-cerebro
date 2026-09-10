@@ -95,6 +95,28 @@ python cyber_brain.py --db cyber_brain.db conv --append --id 1 --role user --tex
 
 ---
 
+## 会话自动打卡（防「上午做下午忘」）
+
+工作告一段落后，用一句话把「干了什么」记进记忆库，自动写入 1 条 event 碎片 + 1 条工作日志；下午/明天新会话开工即能接上。
+
+```bash
+# 打卡（一句话总结，含动作+对象+产出）
+python session_log.py "上午完成知识库上传包 v2.1 升级，向量索引重建到 5873 条"
+
+# 看今天
+python session_log.py --today
+
+# 看最近 10 条
+python session_log.py --list 10
+```
+
+- **自动分类**：含「发布/上传/草稿」→发布记录；「修复/解决/踩坑」→踩坑；「完成/落地/交付/升级」→完成事项；默认→工作日志
+- **自动判重**：同一天相同/相近内容自动跳过（相似度阈值 85%），不重复打卡
+- **Web 看板**：Web 界面「今日」tab 实时展示当日打卡（需 `python web_ui.py` 启动）
+- **MCP 调用**：MCP 服务器第 7 个工具 `session_log_tool`（action: log/today/recent）可直接打卡；豆包等 6 工具上限客户端用 `add_memory(ftype='event', content=...)` 等价
+
+---
+
 ## 数据结构
 
 ```
@@ -134,10 +156,12 @@ python tools/_dup_scan.py
 
 ```
 cyber_brain.py          # 核心引擎（SQLite + FTS5 + 向量 + 记忆）
-web_ui.py               # Web 界面（Flask，搜索/录入/浏览/实体图/AI 问答）
-mcp_server.py           # MCP 服务器（12 能力合并 6 工具，适配豆包）
+web_ui.py               # Web 界面（Flask，搜索/录入/浏览/实体图/AI 问答/今日看板）
+mcp_server.py           # MCP 服务器（6 工具适配豆包 + session_log_tool）
+session_log.py          # 会话自动打卡（event 碎片 + 工作日志 + 自动判重）
 daily_brief.py          # 每日开工上下文生成
 doctor.py               # 环境自检（--fix 自动修）
+COLLAB.md               # AI 协作规约（开工 recall / 任务打卡 / 来源标记）
 requirements.txt        # 依赖
 tools/                  # 测试与工具脚本
 ```
