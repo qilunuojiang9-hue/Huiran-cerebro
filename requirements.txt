@@ -1,0 +1,13 @@
+# 赛博大脑依赖（换机时 pip install -r requirements.txt，一次装齐赛博大脑 + GEO Hub）
+# Python 3.10+
+# --- 赛博大脑 ---
+fastembed>=0.3.0        # bge-small-zh-v1.5 向量模型（首次运行自动下载到 .model_cache/）
+numpy>=1.24
+flask>=2.0              # web_ui.py 的 Web 界面（可选，不用 Web 可注释）
+# --- GEO Hub v2.66（geo-hub-v2.66/） ---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-docx>=1.1
+PyPDF2>=3.0
+python-pptx>=0.6
+python-multipart>=0.0.9
