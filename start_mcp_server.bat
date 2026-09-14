@@ -7,6 +7,6 @@ echo  豆包连接地址: http://127.0.0.1:8765/mcp
 echo  关闭本窗口 = 停止 MCP 服务
 echo ============================================================
 echo.
-cd /d C:\cyber-brain
-%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe mcp_server.py --port 8765
+cd /d "%~dp0"
+"%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe" mcp_server.py --port 8765
 pause

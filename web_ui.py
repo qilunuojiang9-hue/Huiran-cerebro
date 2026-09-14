@@ -648,6 +648,31 @@ def api_conflicts():
     return jsonify({"conflicts": _run(db.detect_conflicts, limit)})
 
 
+@app.get("/api/audits")
+def api_audits():
+    """P2 检索审计：返回检索留痕（可解释 AI 为什么召回这些）。"""
+    mode = request.args.get("mode", "").strip()
+    limit = min(int(request.args.get("limit", 50)), 200)
+    if mode:
+        rows = [dict(r) for r in db.con.execute(
+            "SELECT id, query, mode, candidate_sources, hits_ids, fallback_reason, created_at "
+            "FROM memory_retrieval_audits WHERE mode=? ORDER BY id DESC LIMIT ?",
+            (mode, limit))]
+    else:
+        rows = [dict(r) for r in db.con.execute(
+            "SELECT id, query, mode, candidate_sources, hits_ids, fallback_reason, created_at "
+            "FROM memory_retrieval_audits ORDER BY id DESC LIMIT ?", (limit,))]
+    # 解析 JSON 字段便于展示
+    import json as _j
+    for r in rows:
+        for k in ("candidate_sources", "hits_ids"):
+            try:
+                r[k] = _j.loads(r[k]) if r[k] else []
+            except Exception:
+                r[k] = []
+    return jsonify({"audits": rows})
+
+
 @app.get("/api/links")
 def api_links():
     """列出所有实体关系（含时间窗口），供前台展示/编辑。"""
@@ -795,6 +820,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   <div class="tab" data-tab="graph" onclick="switchTab('graph')">关系图谱</div>
   <div class="tab" data-tab="ask" onclick="switchTab('ask')">AI 问答</div>
   <div class="tab" data-tab="conflict" onclick="switchTab('conflict')">冲突检测</div>
+  <div class="tab" data-tab="audit" onclick="switchTab('audit')">检索记录</div>
   <div class="tab" data-tab="today" onclick="switchTab('today')">今日</div>
 </div>
 
@@ -934,6 +960,18 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
   </div>
 </div>
 
+<div id="panel-audit" class="panel hidden">
+  <div class="card">
+    <h3>检索记录 <span class="n">检索审计 · 可解释</span></h3>
+    <div class="hint">每次 recall / search / 语义检索的留痕。看 AI 为什么召回这些内容 —— 谁在什么时间查了什么、命中了哪些条目（supermemory 式 trace）。</div>
+    <div class="form-row">
+      <div style="flex:1"><button class="btn" onclick="loadAudit()">刷新</button></div>
+      <div style="width:140px"><input id="auditMode" placeholder="按 mode 过滤（留空=全部）"></div>
+    </div>
+    <div id="auditRes" style="margin-top:12px"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
 <div id="panel-today" class="panel hidden">
   <div class="card">
     <h3>今日工作 <span class="n" id="todayDate"></span></h3>
@@ -1009,6 +1047,7 @@ function switchTab(name){
   if(name==='browse'){loadStats();loadList('content');}
   if(name==='graph'){loadGraph();}
   if(name==='today'){loadToday();}
+  if(name==='audit'){loadAudit();}
 }
 
 /* ============ 今日工作看板 ============ */
@@ -1486,6 +1525,34 @@ function scanConflicts(){
         '<div class="md" style="font-size:12px;opacity:.9">['+esc(c.a.slice(0,90))+']</div>'+
         '<div class="md" style="font-size:12px;opacity:.9">['+esc(c.b.slice(0,90))+']</div></div>').join('');
   }).catch(e=>{res.innerHTML='<div class="empty">扫描失败：'+esc(e)+'</div>';});
+}
+
+/* ============ 检索记录（审计）============ */
+function loadAudit(){
+  const box=$('auditRes'); if(!box) return;
+  box.innerHTML='<div class="empty">加载中…</div>';
+  const modeInput=$('auditMode');
+  const mode=modeInput?modeInput.value.trim():'';
+  fetch('/api/audits?mode='+encodeURIComponent(mode)).then(r=>r.json()).then(d=>{
+    const as=d.audits||[];
+    if(!as.length){box.innerHTML='<div class="card"><b>暂无检索记录。</b>跑过 recall/search 后这里会显示留痕。</div>';return;}
+    box.innerHTML='<div class="hint">共 <b>'+as.length+'</b> 条检索留痕（最近优先）：</div>'+
+      as.map(a=>{
+        const src=a.candidate_sources||{};
+        const srcTxt=Object.keys(src).length?Object.entries(src).map(([k,v])=>k+'='+v).join(' · '):'';
+        const hits=(a.hits_ids||[]).length;
+        return '<div class="card" style="margin:6px 0">'+
+          '<div style="display:flex;justify-content:space-between;align-items:center">'+
+          '<b style="font-size:13px">"'+esc(a.query)+'"</b>'+
+          '<span class="n" style="font-size:11px">'+esc(a.created_at||'')+'</span></div>'+
+          '<div style="font-size:12px;margin-top:4px">mode: <code>'+esc(a.mode||'')+'</code>'+
+          (srcTxt?' · 候选: '+esc(srcTxt):'')+
+          ' · 命中 <b>'+hits+'</b> 条'+(a.fallback_reason?' · 回退: '+esc(a.fallback_reason):'')+
+          '</div>'+
+          (hits?'<div style="font-size:11px;opacity:.8;margin-top:2px">命中 ID: '+hits+'</div>':'')+
+          '</div>';
+      }).join('');
+  }).catch(e=>{box.innerHTML='<div class="empty">加载失败：'+esc(e)+'</div>';});
 }
 
 /* ============ 统计 ============ */

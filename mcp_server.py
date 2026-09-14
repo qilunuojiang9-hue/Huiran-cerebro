@@ -120,8 +120,8 @@ def add_memory(
         ftype: 碎片类型（fact 事实 / preference 偏好 / emotion 情绪 / knowledge 知识 / decision 决策 / iron_rule 铁律 / event 事件 / pitfall 踩坑）。
         content: 碎片正文（一句话或短段）。
         subject: 主题（默认 work）。
-        tags: 逗号分隔标签，如 "公司,获客"。
-        entities: 逗号分隔关联实体名，如 "某公司,某人"。
+        tags: 逗号分隔标签，如 "项目,调研"。
+        entities: 逗号分隔关联实体名，如 "张三,方案A"。
         source_ref: 来源（默认 mcp-doubao，可写 doubao-export 等）。
 
     提示（豆包端）：用 ftype=event + content="今天做了..." 可等价于 session_log 打卡。

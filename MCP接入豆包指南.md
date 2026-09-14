@@ -13,12 +13,12 @@
 ## 二、启动 MCP 服务器
 
 **方式 1：双击脚本（推荐）**
-双击 `C:\cyber-brain\start_mcp_server.bat`，看到 `赛博大脑 MCP 服务器 启动` 即成功。**保持窗口开着**（关窗口 = 停服务）。
+双击项目目录下的 `start_mcp_server.bat`（与 `mcp_server.py` 同目录），看到 `赛博大脑 MCP 服务器 启动` 即成功。**保持窗口开着**（关窗口 = 停服务）。
 
 **方式 2：命令行**
 ```bash
-cd C:\cyber-brain
-%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe mcp_server.py --port 8765
+cd /path/to/huiran-cerebro
+python mcp_server.py --port 8765
 ```
 
 **验证**：浏览器访问 `http://127.0.0.1:8765/mcp`，出现 `Bad Request: Missing session ID` 是**正常的**（说明服务在监听）；如果是连接失败/拒绝连接，说明没启动。

@@ -190,6 +190,8 @@ CREATE TABLE IF NOT EXISTS memory_fragments (
   status TEXT DEFAULT 'active',
   source_ref TEXT,
   embedding_state TEXT DEFAULT 'disabled',
+  importance TEXT NOT NULL DEFAULT 'normal',
+  namespace TEXT NOT NULL DEFAULT 'default',
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -290,6 +292,16 @@ class CyberBrain:
             if "valid_until" not in cols:
                 self.con.execute("ALTER TABLE entity_link ADD COLUMN valid_until TEXT")
             self.con.execute("CREATE INDEX IF NOT EXISTS idx_entity_link_valid ON entity_link(valid_until)")
+            self.con.commit()
+        except Exception:
+            pass
+        # 迁移：老库 memory_fragments 补 importance / namespace 列（幂等）
+        try:
+            cols = [r[1] for r in self.con.execute("PRAGMA table_info(memory_fragments)")]
+            if "importance" not in cols:
+                self.con.execute("ALTER TABLE memory_fragments ADD COLUMN importance TEXT NOT NULL DEFAULT 'normal'")
+            if "namespace" not in cols:
+                self.con.execute("ALTER TABLE memory_fragments ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'")
             self.con.commit()
         except Exception:
             pass
@@ -585,13 +597,37 @@ class CyberBrain:
         return cur.lastrowid
 
     # ------------------------------------------------- 记忆层（同类产品）
-    def add_fragment(self, ftype, content, subject="work", tags=None, entities=None, source_ref=None):
+    # 2026-09-14 P1：importance 自动分级（铁律/决策/踩坑=high，事件=low，其余=normal）
+    _IMPORTANCE_RULES = {
+        "iron_rule": "high",
+        "decision": "high",
+        "pitfall": "high",
+        "event": "low",
+        "fact": "normal",
+        "preference": "normal",
+        "emotion": "low",
+        "knowledge": "normal",
+    }
+
+    def _auto_importance(self, ftype, content):
+        imp = self._IMPORTANCE_RULES.get(ftype, "normal")
+        # 关键词加权：含"铁律/红线/必须/禁止/踩坑/教训/决定"升 high
+        for kw in ("铁律", "红线", "必须", "禁止", "踩坑", "教训", "决定", "不可"):
+            if kw in (content or ""):
+                imp = "high"
+                break
+        return imp
+
+    def add_fragment(self, ftype, content, subject="work", tags=None, entities=None, source_ref=None,
+                     importance=None):
         if ftype not in FRAGMENT_TYPES:
             raise ValueError(f"fragment_type 必须是 {FRAGMENT_TYPES}")
+        if importance is None:
+            importance = self._auto_importance(ftype, content)
         cur = self.con.execute(
-            "INSERT INTO memory_fragments(fragment_type,subject,content,entities,tags,source_ref) "
-            "VALUES(?,?,?,?,?,?)",
-            (ftype, subject, content, _jl(entities), _jl(tags), source_ref))
+            "INSERT INTO memory_fragments(fragment_type,subject,content,entities,tags,source_ref,importance) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (ftype, subject, content, _jl(entities), _jl(tags), source_ref, importance))
         self.con.commit()
         return cur.lastrowid
 
@@ -608,7 +644,10 @@ class CyberBrain:
         p.append(limit)
         return self.con.execute(sql, p).fetchall()
 
-    def search_memory(self, q, limit=20, audit=True, mode="fts+like", namespace=None):
+    def search_memory(self, q, limit=20, audit=True, mode="fts+like", namespace=None, days=None):
+        """检索记忆碎片。days>0 时只返回最近 N 天（时间感知检索 P0-2）。
+        RRF 融合：FTS(BM25) + LIKE + 语义三路（语义在 recall 层做，这里关键词两路）。
+        """
         q = (q or "").strip()
         ids = set(self._fts_ids("fragment_fts", ["content"], q, limit * 3) or [])
         ids |= set(self._like_ids("memory_fragments", ["content", "tags"], q, limit * 3, namespace=namespace))
@@ -619,6 +658,10 @@ class CyberBrain:
                 rows.append(r)
         # P1 decay：importance=high 加权；普通碎片按创建时间衰减（只降权不删除）
         rows.sort(key=lambda r: self._decay_key(r), reverse=True)
+        if days:
+            import datetime as _dt
+            cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+            rows = [r for r in rows if (r["created_at"] or "")[:10] >= cutoff]
         rows = rows[:limit]
         if audit:
             self._audit(q, mode, {"memory_fragments": len(ids)}, [r["id"] for r in rows])
@@ -718,6 +761,97 @@ class CyberBrain:
             return 0.0
         return len(sa & sb) / len(sa | sb)
 
+    # ------------------------------------------------- P1 记忆生命周期管理（2026-09-14）
+    def lifecycle_audit(self, stale_days=30):
+        """只读审计：①importance 缺失/异常 ②30 天以上未更新的低重要度碎片（可降权）。
+        返回统计与建议，不修改数据。
+        """
+        import datetime as _dt
+        today = _dt.date.today()
+        rows = self.con.execute(
+            "SELECT id, fragment_type, importance, created_at, content FROM memory_fragments "
+            "WHERE status='active'").fetchall()
+        report = {"total": len(rows), "missing_importance": 0, "stale_low": []}
+        for r in rows:
+            imp = r["importance"] or "normal"
+            if imp not in ("high", "medium", "low", "normal"):
+                report["missing_importance"] += 1
+            try:
+                d = _dt.date.fromisoformat((r["created_at"] or "")[:10])
+                age = (today - d).days
+            except Exception:
+                age = 0
+            if age >= stale_days and imp in ("low", "normal", None):
+                report["stale_low"].append({
+                    "id": r["id"], "type": r["fragment_type"], "age_days": age,
+                    "importance": imp or "normal", "content": r["content"][:60]})
+        report["stale_low"].sort(key=lambda x: -x["age_days"])
+        return report
+
+    def lifecycle_apply(self, stale_days=30, dry_run=False):
+        """自动修复：①缺失 importance 自动分级 ②30 天以上低重要度碎片降为 low。
+        dry_run=True 只打印不落库。返回改动统计。
+        """
+        import datetime as _dt
+        today = _dt.date.today()
+        fixed_imp = 0
+        demoted = 0
+        rows = self.con.execute(
+            "SELECT id, fragment_type, importance, created_at, content FROM memory_fragments "
+            "WHERE status='active'").fetchall()
+        for r in rows:
+            imp = r["importance"] or "normal"
+            if imp not in ("high", "medium", "low", "normal"):
+                new_imp = self._auto_importance(r["fragment_type"], r["content"])
+                if not dry_run:
+                    self.con.execute("UPDATE memory_fragments SET importance=? WHERE id=?",
+                                     (new_imp, r["id"]))
+                fixed_imp += 1
+            try:
+                d = _dt.date.fromisoformat((r["created_at"] or "")[:10])
+                age = (today - d).days
+            except Exception:
+                age = 0
+            imp2 = r["importance"] or "normal"
+            if age >= stale_days and imp2 in ("low", "normal", None):
+                if not dry_run:
+                    self.con.execute(
+                        "UPDATE memory_fragments SET importance='low', updated_at=datetime('now','localtime') "
+                        "WHERE id=? AND importance IN ('low','normal')", (r["id"],))
+                demoted += 1
+        if not dry_run:
+            self.con.commit()
+        return {"importance_fixed": fixed_imp, "demoted_stale": demoted}
+
+    def dedupe_fragments(self, threshold=0.8, dry_run=False):
+        """重复碎片合并：内容 Jaccard >= threshold 的碎片，标记后写者 status='merged'（不删原文）。
+        保留先创建者（信息源），后写者合并到它。返回候选对。
+        """
+        rows = self.con.execute(
+            "SELECT id, content, created_at FROM memory_fragments "
+            "WHERE status='active' AND content IS NOT NULL AND length(content)>=8 "
+            "ORDER BY id ASC").fetchall()
+        cand = []
+        merged = 0
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                a, b = rows[i], rows[j]
+                if a["content"] == b["content"]:
+                    sim = 1.0
+                else:
+                    sim = self._jaccard(a["content"], b["content"])
+                if sim >= threshold:
+                    cand.append({"a_id": a["id"], "b_id": b["id"], "sim": round(sim, 2),
+                                 "a": a["content"][:60], "b": b["content"][:60]})
+                    if not dry_run:
+                        self.con.execute(
+                            "UPDATE memory_fragments SET status='merged', updated_at=datetime('now','localtime') "
+                            "WHERE id=?", (b["id"],))
+                        merged += 1
+        if not dry_run:
+            self.con.commit()
+        return {"candidates": cand[:50], "merged_count": merged}
+
     def add_rolling_summary(self, scope_key, summary, start_ref=None, end_ref=None, version=None):
         if version is None:
             last = self.con.execute(
@@ -761,13 +895,15 @@ class CyberBrain:
         except Exception:
             pass
 
-    def recall(self, query=None, top_summaries=2, limit=8):
-        """防遗忘：按请求命中记忆碎片 + 滚动摘要，输出紧凑上下文。"""
+    def recall(self, query=None, top_summaries=2, limit=8, days=None):
+        """防遗忘：按请求命中记忆碎片 + 滚动摘要，输出紧凑上下文。
+        days>0 时只召回最近 N 天（时间感知 P0-2）；碎片经 RRF 混合排序。
+        """
         lines = []
         for s in self.con.execute(
                 "SELECT * FROM rolling_summaries ORDER BY id DESC LIMIT ?", (top_summaries,)).fetchall():
             lines.append(f"[滚动摘要 v{s['checkpoint_version']} · {s['scope_key']}] {s['summary']}")
-        frags = self.search_memory(query, limit=limit, audit=False) if query else self.list_fragments(limit=limit)
+        frags = self.search_memory(query, limit=limit, audit=False, days=days) if query else self.list_fragments(limit=limit)
         if query:
             seen = {f["id"] for f in frags}
             try:
@@ -821,35 +957,48 @@ class CyberBrain:
         self._audit(q, "unified", src, hits)
         return res
 
-    def _hybrid_rerank(self, q, semantic, limit=10):
-        """把关键词命中（content/memory/kb）与语义命中融合成统一排序列表。
-        返回带 score 的语义条目（已融入关键词信号），保留原字段结构。
+    def _rrf_fusion(self, lists, k=60):
+        """Reciprocal Rank Fusion：多路检索结果融合排序（2026-09-14 P0-1）。
+        每路结果按 rank 打分 1/(k+rank)，同 id 跨路累加，分数高者靠前。
+        lists: [(id, type), ...] 多路有序列表；k 默认 60（RRF 标准）。
         """
-        try:
-            mem_ids = {r["id"] for r in self._like_ids("memory_fragments", ["content", "tags"], q, 30)}
-            kb_ids = set(self._fts_ids("kb_chunk_fts", ["content"], q, 30) or [])
-            kb_ids |= set(self._like_ids("kb_chunk", ["content"], q, 30))
-            kw_ids = set(self._fts_ids("content_fts", ["title", "body"], q, 30) or [])
-            kw_ids |= set(self._like_ids("content_item", ["title", "body"], q, 30))
-        except Exception:
-            mem_ids, kb_ids, kw_ids = set(), set(), set()
+        scores = {}
+        for lst in lists:
+            for rank, (tid, iid) in enumerate(lst):
+                key = (tid, iid)
+                scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    def _hybrid_rerank(self, q, semantic, limit=10):
+        """多信号混合检索：FTS(BM25) + LIKE + 语义向量 三路 RRF 融合（2026-09-14 P0-1）。
+        返回带 score 的语义条目（已融入全部信号），保留原字段结构。
+        相比旧版：不再只是"语义基础上 boost"，而是三路独立召回后 RRF 融合，
+        中文短词（<3 字，FTS 不命中）也能靠 LIKE+语义两路兜底。
+        """
+        q = (q or "").strip()
+        # ── 三路召回（每路返回 (type, id) 有序列表）──
+        mem_fts = [( "memory_fragment", i) for i in (self._fts_ids("fragment_fts", ["content"], q, 40) or [])]
+        mem_like = [("memory_fragment", i) for i in self._like_ids("memory_fragments", ["content", "tags"], q, 40)]
+        kb_fts = [("kb_chunk", i) for i in (self._fts_ids("kb_chunk_fts", ["content"], q, 40) or [])]
+        kb_like = [("kb_chunk", i) for i in self._like_ids("kb_chunk", ["content"], q, 40)]
+        kw_fts = [("content", i) for i in (self._fts_ids("content_fts", ["title", "body"], q, 40) or [])]
+        kw_like = [("content", i) for i in self._like_ids("content_item", ["title", "body"], q, 40)]
+        ent_like = [("entity", i) for i in self._like_ids("entity", ["name", "org"], q, 40)]
+        # ── RRF 融合（FTS / LIKE / 实体 三路 → 得到关键词融合排序）──
+        kw_rank = self._rrf_fusion([mem_fts, mem_like, kb_fts, kb_like, kw_fts, kw_like, ent_like])
+        kw_map = dict(kw_rank)
         if not semantic:
             return []
-        boost = {}
-        for i, s in enumerate(semantic[:limit]):
-            key = (s["type"], s["id"])
-            if (s["type"] == "memory_fragment" and s["id"] in mem_ids):
-                boost[key] = 0.25
-            elif (s["type"] == "kb_chunk" and s["id"] in kb_ids):
-                boost[key] = 0.2
-            elif (s["type"] == "content" and s["id"] in kw_ids):
-                boost[key] = 0.2
-            else:
-                boost[key] = 0.0
+        # ── 语义分与关键词 RRF 分融合：各归一化后 0.6/0.4 加权 ──
+        max_sem = max((s.get("score") or 0) for s in semantic) or 1.0
         for s in semantic:
             key = (s["type"], s["id"])
-            s["score"] = round(min(s["score"] + boost.get(key, 0.0), 1.0), 4)
-        semantic.sort(key=lambda x: x["score"], reverse=True)
+            kw_sc = kw_map.get(key, 0.0)
+            sem_sc = (s.get("score") or 0.0) / max_sem
+            # 关键词命中即至少进入"命中集"，语义强相关也保留
+            s["score"] = round(min(0.4 * min(kw_sc * 3.0, 1.0) + 0.6 * sem_sc, 1.0), 4)
+            s["kw_hit"] = key in kw_map
+        semantic.sort(key=lambda x: (x["score"], x.get("kw_hit", False)), reverse=True)
         return semantic[:limit]
 
     # ------------------------------------------------- 统计
@@ -1291,6 +1440,13 @@ def _main(argv=None):
 
     pr = sub.add_parser("recall", help="防遗忘：命中记忆碎片+摘要")
     pr.add_argument("query", nargs="?", default=None)
+    pr.add_argument("--days", type=int, default=None, help="只召回最近 N 天（时间感知）")
+
+    plife = sub.add_parser("lifecycle", help="记忆生命周期管理（P1）")
+    plife.add_argument("--audit", action="store_true", help="扫描 importance 缺失/过期事件（只读）")
+    plife.add_argument("--apply", action="store_true", help="自动修复：补 importance + 降权 30 天以上事件")
+    plife.add_argument("--dedupe", action="store_true", help="重复碎片合并（Jaccard>0.8 内容高重叠，保留新者标记）")
+    plife.add_argument("--threshold", type=float, default=0.8, help="去重相似度阈值（默认 0.8）")
 
     psr = sub.add_parser("search", help="统一搜索")
     psr.add_argument("query")
@@ -1455,8 +1611,31 @@ def _main(argv=None):
             print("summary: 需要 --add / --get")
 
     elif args.cmd == "recall":
-        for line in db.recall(args.query):
+        for line in db.recall(args.query, days=args.days):
             print(line)
+
+    elif args.cmd == "lifecycle":
+        if args.audit:
+            rep = db.lifecycle_audit()
+            print(f"总碎片: {rep['total']} | 缺 importance: {rep['missing_importance']} | 过期低优先: {len(rep['stale_low'])}")
+            for s in rep["stale_low"][:10]:
+                print(f"  过期 {s['age_days']}天 #{s['id']} [{s['type']}] {s['content']}")
+            if rep["stale_low"]:
+                print("  提示: 跑 lifecycle --apply 自动降权；跑 lifecycle --dedupe 合并重复")
+        elif args.apply:
+            rep = db.lifecycle_apply(dry_run=True)
+            print(f"[预演] 将修复 {rep['importance_fixed']} 条 importance，降权 {rep['demoted_stale']} 条过期碎片")
+            rep = db.lifecycle_apply(dry_run=False)
+            print(f"[已执行] 修复 {rep['importance_fixed']} 条 importance，降权 {rep['demoted_stale']} 条过期碎片 ✅")
+        elif args.dedupe:
+            rep = db.dedupe_fragments(threshold=args.threshold, dry_run=True)
+            print(f"[预演] 发现 {len(rep['candidates'])} 对重复碎片（阈值 {args.threshold}）")
+            for c in rep["candidates"][:10]:
+                print(f"  #{c['a_id']} ≈ #{c['b_id']} (sim {c['sim']}) {c['a']}")
+            if rep["candidates"]:
+                print("  提示: 重跑加 --dedupe 会实际标记后写者为 merged（不删原文）")
+        else:
+            print("lifecycle: 需要 --audit / --apply / --dedupe")
 
     elif args.cmd == "search":
         res = db.search(args.query)

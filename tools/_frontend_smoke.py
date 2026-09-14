@@ -28,7 +28,7 @@ def main():
         print("3) 统计块已渲染，字符数:", len(stat_txt))
 
         # 搜索
-        pg.fill("#q", "某客户")
+        pg.fill("#q", "测试关键词")
         pg.click("button.btn.blue")
         pg.wait_for_timeout(3500)
         # 等语义检索结果（较慢）
@@ -66,7 +66,7 @@ def main():
         # 实体关系 Tab
         pg.click(".tab[data-tab='rel']")
         pg.wait_for_timeout(500)
-        pg.fill("#relQ", "某公司")
+        pg.fill("#relQ", "测试实体")
         pg.click("#panel-rel button.btn.blue")
         pg.wait_for_timeout(2500)
         matches = pg.eval_on_selector_all("#relMatches .rel", "els=>els.map(e=>e.textContent)")

@@ -35,3 +35,6 @@ Thumbs.db
 *.bak
 *.bak_*
 *.stale_*
+
+# 临时提交消息
+.commit_msg_tmp.txt
