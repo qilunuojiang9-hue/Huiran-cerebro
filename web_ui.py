@@ -166,9 +166,55 @@ def _row(r):
     return dict(r) if r is not None else None
 
 
+def _hint_samples(limit=4):
+    """为输入框提示取样例：用库里真实出现过的类目 / 标签。
+
+    空库（新克隆的使用者）返回空列表，调用方回落到通用文案 ——
+    因此发布版不携带任何特定行业/项目痕迹，使用者看到的也是自己的数据。
+    """
+    out, seen = [], set()
+    try:
+        with _lock:
+            cats = db.con.execute(
+                "SELECT category FROM content_item "
+                "WHERE category IS NOT NULL AND TRIM(category) <> '' "
+                "GROUP BY category ORDER BY COUNT(*) DESC LIMIT ?",
+                (limit,)).fetchall()
+            tags = db.con.execute(
+                "SELECT tags_json FROM content_item "
+                "WHERE tags_json IS NOT NULL AND tags_json NOT IN ('', '[]') "
+                "ORDER BY updated_at DESC LIMIT 30").fetchall()
+        cand = [r["category"] for r in cats]
+        for r in tags:
+            try:
+                v = json.loads(r["tags_json"])
+            except Exception:
+                continue
+            if isinstance(v, list):
+                cand += [str(x) for x in v]
+        for c in cand:
+            c = (c or "").strip()
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+            if len(out) >= limit:
+                break
+    except Exception:
+        pass
+    return out
+
+
 @app.get("/")
 def index():
-    return HTML
+    # 输入框提示取自当前库的真实类目/标签，空库回落通用文案。
+    # 好处：① 开源版不带任何特定行业痕迹 ② 使用者看到的是自己的数据
+    from html import escape as _esc
+    s = _hint_samples()
+    cat_hint = _esc("/".join(s[:3]) + "/..." if s else "类目名/标签", quote=True)
+    search_hint = _esc("搜什么？例如：" + " / ".join(s) if s else "搜什么？输入关键词",
+                       quote=True)
+    return (HTML.replace("__CAT_HINT__", cat_hint)
+                .replace("__SEARCH_HINT__", search_hint))
 
 
 @app.get("/api/stats")
@@ -801,7 +847,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
 </header>
 
 <div class="searchbar">
-  <input id="q" placeholder="搜什么？例如：收款 / 平台 / 选题 / 发布红线 / 客户名" onkeydown="if(event.key==='Enter')doSearch()">
+  <input id="q" placeholder="__SEARCH_HINT__" onkeydown="if(event.key==='Enter')doSearch()">
   <input id="ns" placeholder="命名空间(可选: 默认 default)" style="max-width:180px" title="多项目隔离：只搜某个命名空间">
   <button class="btn blue" onclick="doSearch()">搜索</button>
   <button class="btn amber" onclick="doRecall()">回忆（防遗忘）</button>
@@ -845,7 +891,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue)}
       <div>
         <div class="form-row">
           <div><label>类型</label><select id="c_type"><option value="note">笔记</option><option value="task">任务</option><option value="decision">决策</option><option value="meeting">会议</option><option value="idea">想法</option><option value="issue">问题</option><option value="article">文章</option></select></div>
-          <div><label>类目/赛道</label><input id="c_cat" placeholder="独立站/跨境支付/..."></div>
+          <div><label>类目/赛道</label><input id="c_cat" placeholder="__CAT_HINT__"></div>
         </div>
         <label>标签（逗号分隔）</label><input id="c_tags" placeholder="标签1,标签2">
         <label>来源标记（合规）</label><input id="c_src" placeholder="manual / web / content_brain">

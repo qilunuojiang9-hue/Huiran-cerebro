@@ -18,7 +18,7 @@
   - 自动化：WorkBuddy 每日自动化（收工时间）调用本脚本
   - MCP：recall(mode=daily) 或 session_log_tool 之外，也可直接跑本脚本
 
-原理（对标 memU 主动提取 + 同类产品滚动摘要）：
+原理（对标 memU 的主动提取 + 滚动摘要）：
   ① 拉取时间窗内全部 event 碎片
   ② 关键词规则把「决策/踩坑/完成」分类
   ③ 生成一条汇总摘要写入 rolling_summaries

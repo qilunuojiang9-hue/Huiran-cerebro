@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-塞博大脑 Cyber Brain —— 个人工作知识库
-三源融合：
-  公司库 internal-system   -> 数据骨架（content_item / kb 三件套 / ai_conversation / master_data / 合规标记）
-  同类产品.EXE           -> 记忆层（memory_fragments / rolling_summaries / retrieval_audits / memory_relations）
-  content_brain      -> 工作域（entity / entity_link：项目·客户·账号·平台·产品）
+塞博大脑 Cyber Brain —— 个人/团队记忆中枢与知识库引擎
+
+四层数据模型：
+  内容层    -> content_item（笔记 / 文章 / 任务 / 决策 + 合规标记）
+  知识库层  -> kb_document / kb_chunk / kb_embedding（RAG 分块与向量）
+  记忆层    -> memory_fragments / rolling_summaries / memory_relations / retrieval_audits
+  工作域    -> entity / entity_link（项目·客户·账号·平台·产品）
+
 引擎：SQLite 单文件 + FTS5(trigram) 中文分词；向量列预留（未来 sqlite-vss / pgvector）
 
 用法：
@@ -20,6 +23,9 @@ import os
 import datetime
 
 __all__ = ["CyberBrain", "ENTITY_TYPES", "CONTENT_TYPES", "FRAGMENT_TYPES"]
+
+# 版本号单一事实源：改这里，然后跑 tools/check_version.py 同步 README 徽章
+__version__ = "1.5.0"
 
 ENTITY_TYPES = ["person", "org", "project", "account", "platform", "product", "tool", "other"]
 CONTENT_TYPES = ["note", "article", "task", "decision", "meeting", "idea", "issue", "report"]
@@ -596,7 +602,7 @@ class CyberBrain:
         self.con.commit()
         return cur.lastrowid
 
-    # ------------------------------------------------- 记忆层（同类产品）
+    # ------------------------------------------------- 记忆层
     # 2026-09-14 P1：importance 自动分级（铁律/决策/踩坑=high，事件=low，其余=normal）
     _IMPORTANCE_RULES = {
         "iron_rule": "high",
@@ -1305,7 +1311,7 @@ class CyberBrain:
         # 用户自定义每日指引（可在此按需追加，如产出目录/状态机/SOP 路径）
         # 示例：lines.append("[流水线] 产出目录: /path/to/output/")
 
-        # ── P1 主动提醒（2026-09-09 v2.1，学同类产品"主动行为"）──
+        # ── P1 主动提醒（v2.1：借鉴同类记忆产品的"主动行为"设计）──
         # ① 未完成的工作项（status != done）
         todo = self.con.execute(
             "SELECT title, status FROM content_item "
@@ -1377,7 +1383,11 @@ class CyberBrain:
 # ========================================================= CLI
 def _main(argv=None):
     import argparse
-    p = argparse.ArgumentParser(prog="cyber_brain", description="塞博大脑 · 个人工作知识库（三源融合）")
+    p = argparse.ArgumentParser(
+        prog="cyber_brain",
+        description="塞博大脑 · 个人/团队记忆中枢与知识库引擎")
+    p.add_argument("--version", action="version",
+                   version="Huiran-cerebro v%s" % __version__)
     p.add_argument("--db", default="cyber_brain.db")
     sub = p.add_subparsers(dest="cmd")
 

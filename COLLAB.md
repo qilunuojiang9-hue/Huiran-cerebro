@@ -61,18 +61,25 @@
   - README.md 工作区版是内部版（三源融合/客户台账），repo 版是对外开源介绍
   - 覆盖 = 把内部信息公开到 GitHub（不可逆！）
 
-## 四·五、发布到 GitHub 的正确姿势（2026-09-10 落地）
+## 四·五、发布到 GitHub 的正确姿势
 
-1. **先 diff 再动**：`git -C repo diff HEAD -- <file>` 看 repo 版与 HEAD 的差异，判断哪些是本次更新该发布的
-2. **代码文件**（mcp_server.py / session_log.py 等）：确认无敏感后可直接同步
-3. **内部信息文件**（cyber_brain.py / web_ui.py / README.md）：**增量补丁**——只在 repo 版基础上加新功能/新章节，绝不整体覆盖
-4. **发布前全仓扫描**：`grep -rnE "C:/Users|WorkBuddy|内部技能名|客户名" repo/` 确认零残留
-5. **提交 + 版本化发布**（不直接 push master，走 tag + Release）：
+1. **先 diff 再动**：`git diff HEAD -- <file>` 看发布版与工作目录的差异，判断哪些是本次该发布的
+2. **代码文件**：确认无敏感后可直接同步
+3. **主程序与文档**（`cyber_brain.py` / `web_ui.py` / `README.md`）：**增量补丁**——只在发布版基础上加新功能/新章节，**绝不整体覆盖**
+4. **发布前全量脱敏扫描（必做，不可省）**
+   - 扫描范围必须是 **工作树 + 全部 git 对象（含历史）**，**不能只扫当前文件**
+   - 历史里的内容不会因为「文件被改了」而消失 —— 要清除必须重写历史（`git filter-repo`）
+   - 至少覆盖：本机绝对路径 · 真实姓名与账号 · 组织与客户标识 · 内部系统名 · 凭证形态 · 联系方式
+   - **零残留才允许推送。** 本仓库配套 `publish_guard` 扫描器，并已挂 pre-push 钩子强制执行
+5. **禁止在未验证的情况下声明「已脱敏 / 无敏感信息」** —— 这类声明必须能附上扫描结果
+6. **提交 + 版本化发布**（不直接改 master，走 tag + Release）
+   - 改 `cyber_brain.py` 的 `__version__`（**唯一事实源**）→ 跑 `python tools/check_version.py --tag` 确认徽章与 tag 对齐
    - commit → `git push origin master`
-   - 打 tag：`git tag vX.Y.Z`（语义化：新功能 minor，修 bug patch）→ `git push origin vX.Y.Z`
-   - 建 Release（gh CLI）：`gh release create vX.Y.Z --target master --title "Huiran-cerebro vX.Y.Z" --notes "更新说明"`
-   - Release 会自动标记 Latest，旧版本保留可追溯
-6. **提交后打卡**：`session_log.py "GitHub 发布 vX.Y.Z：..."` 留痕
+   - 打 tag：`git tag vX.Y.Z` → `git push origin vX.Y.Z`
+   - （可选）建 Release：`gh release create vX.Y.Z --target master --title "Huiran-cerebro vX.Y.Z" --notes "更新说明"`
+   - 版本号怎么递增、发版节奏：见 [`CHANGELOG.md`](CHANGELOG.md) 文末「版本号规则」
+7. **发布后复核**：从远端**全新克隆**再扫一遍（不看本地），并确认 fork 数
+8. **提交后打卡**：`session_log.py "GitHub 发布 vX.Y.Z：..."` 留痕
 
 ## 五、当你看到这份文件时
 

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/版本-v1.4.0-4B8BF5" alt="version">
+  <img src="https://img.shields.io/badge/版本-v1.5.0-4B8BF5" alt="version">
   <img src="https://img.shields.io/badge/语言-Python%203.10%2B-3776AB" alt="python">
   <img src="https://img.shields.io/badge/许可证-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/数据库-SQLite%20%2B%20FTS5%20trigram-blue" alt="db">
