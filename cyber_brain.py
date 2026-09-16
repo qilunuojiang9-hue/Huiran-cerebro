@@ -1274,16 +1274,26 @@ class CyberBrain:
             "ORDER BY updated_at DESC LIMIT 10").fetchall()
         for r in pend:
             lines.append(f"[待办·发布] {r['title']}")
-        # 客户台账（2026-09-04 起：entity 表维护，root=root 服务方）
+        # 客户台账：以「服务方」实体为 root，列出其服务中的客户
+        # root 可用环境变量 CYBER_BRAIN_ROOT_ENTITY 指定（填实体名）；
+        # 未指定时自动取 serves 关系最多的 account 实体
         try:
-            root = self.con.execute("SELECT id FROM entity WHERE name='root' AND type='account'").fetchone()
+            root_name = (os.environ.get("CYBER_BRAIN_ROOT_ENTITY") or "").strip()
+            if root_name:
+                root = self.con.execute(
+                    "SELECT id FROM entity WHERE name=? AND type='account'",
+                    (root_name,)).fetchone()
+            else:
+                root = self.con.execute(
+                    "SELECT from_id AS id FROM entity_link WHERE relation='serves' "
+                    "GROUP BY from_id ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
             if root:
                 custs = self.con.execute(
                     "SELECT e.name, e.meta_json FROM entity_link l "
                     "JOIN entity e ON e.id=l.to_id WHERE l.from_id=? AND l.relation='serves' "
                     "ORDER BY e.id", (root["id"],)).fetchall()
                 if custs:
-                    lines.append("[客户台账] root服务客户：")
+                    lines.append("[客户台账] 服务客户：")
                     for c in custs:
                         m = _parse(c["meta_json"], {})
                         st = m.get("status", "")

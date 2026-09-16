@@ -331,7 +331,7 @@ def api_ask():
                         (" " + (e["org"] or "") if e["org"] else "") + extra).strip())
     except Exception:
         pass
-    # 客户台账关系（root → serves → 各客户），让"服务哪些客户"能答出具体名字
+    # 客户台账关系（服务方 → serves → 各客户），让"服务哪些客户"能答出具体名字
     # 时间有效性：valid_until 已过期（<今天）的客户关系不再计入
     try:
         with _lock:
@@ -353,7 +353,7 @@ def api_ask():
                     ind = ""
                 names.append((c.get("name") or "") + (f"（{ind}）" if ind else ""))
             if names:
-                ctx.append("[客户台账] root服务客户：" + "、".join(names))
+                ctx.append("[客户台账] 服务客户：" + "、".join(names))
     except Exception:
         pass
     seen, uniq = set(), []
