@@ -48,7 +48,7 @@
 - `web_upload` — Web 端录入
 - `import_*` — 从某工作区/某文件导入
 - `ai_synthesis` — LLM 合成/提炼的内容
-- `external:<name>` — 来自外部系统（如飞书/thirdparty-api）
+- `external:<name>` — 来自外部系统/第三方平台（`<name>` 自行替换）
 
 ## 四、不要做的事
 

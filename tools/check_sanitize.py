@@ -11,39 +11,52 @@
     python tools/check_sanitize.py -v         # 连原文一起打印（谨慎，别贴到公开地方）
 
 退出码：0 = 干净；1 = 有 P0/P1 命中（可用于 pre-commit / CI）
+
+────────────────────────────────────────────────────────────────────────────
+⚠️ 设计要点：**具体公司名 / 客户名 / 人名不写在本文件里**
+
+本文件是公开的。如果把真实主体名称直接写进规则表，
+等于把客户名单和内部信息一起公开了 —— 检验工具自己就成了泄漏源。
+
+所以分两层：
+  ① 通用规则（本文件的 RULES）—— 只含机器痕迹、凭据格式、联系方式这类
+     与具体主体无关的模式，可以安全公开；
+  ② 私有词表（仓库根目录 sanitize_terms.local.txt，**已被 .gitignore 排除**）
+     —— 公司名、客户名、内部域名、真实人名全在这里，本地才有。
+
+clone 本仓库的人没有第 ② 层，脚本会退化成只跑通用规则（仍然可用，
+只是查不出特定主体的名字）。要补，自己建一个 sanitize_terms.local.txt 即可。
+────────────────────────────────────────────────────────────────────────────
 """
 import os
 import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TERMS_FILE = os.path.join(ROOT, "sanitize_terms.local.txt")
 
 SKIP_DIRS = {".git", "__pycache__", ".model_cache", "node_modules", ".venv", "venv"}
 SKIP_EXT = {".db", ".sqlite", ".sqlite3", ".onnx", ".bin", ".model", ".png", ".jpg",
             ".jpeg", ".gif", ".svg", ".ico", ".zip", ".mp4", ".mp3", ".wav", ".pdf"}
-# 这些文件本身就要讲"怎么脱敏"，会包含示例关键词 → 白名单
-WHITELIST_FILES = {"tools/check_sanitize.py", "README.md", "CHANGELOG.md", "llms.txt"}
 
-# ── 规则表 ────────────────────────────────────────────────
-# level: P0 = 绝对不能发；P1 = 大概率不该发；P2 = 提示人工确认
+# 不做整文件白名单 —— 那会留下检查盲区。
+# 若某个文件里出现了「作为反面示例的敏感串」，请用下面 ALLOW 的逐行豁免，
+# 或者直接把那个串改写成占位符（更推荐）。
+WHITELIST_FILES = set()
+
+# 本地专属文件：它们**就是用来存放敏感词的**（且已被 .gitignore 排除），
+# 扫描它们只会得到 100% 的自我命中噪音。
+LOCAL_ONLY = {"sanitize_terms.local.txt"}
+LOCAL_ONLY_SUFFIX = (".local.txt", ".local.json")
+
+# ── ① 通用规则（与具体主体无关，可安全公开）─────────────────────────────
 RULES = [
     # —— 本地机器痕迹 ——
     ("P0", "本机 Windows 用户名路径", re.compile(r"[Cc]:[\\/]+Users[\\/]+[A-Za-z0-9_.\-]+")),
     ("P0", "macOS 用户路径", re.compile(r"/Users/[A-Za-z0-9_.\-]+/")),
-    ("P0", "本机赛博大脑路径", re.compile(r"[Cc]:[\\/]+cyber-brain", re.I)),
     ("P0", "WorkBuddy 工作区路径", re.compile(r"WorkBuddy[\\/]+20\d\d-\d\d-\d\d")),
     ("P0", "WorkBuddy 技能目录", re.compile(r"\.workbuddy[\\/]+skills", re.I)),
-
-    # —— 公司 / 品牌 ——
-    ("P0", "公司名（YourCompany）", re.compile(r"YourCompany")),
-    ("P0", "公司名（英文）", re.compile(r"yourcompany|yourcompany|internal-server", re.I)),
-    ("P0", "内部域名", re.compile(r"(?:ai\.)?yourcompany\.com|git\.internal-server\.net|d1ss", re.I)),
-    ("P0", "内部系统名", re.compile(r"internal-system|内部系统|GEO\s*Hub|internal-project", re.I)),
-
-    # —— 客户 / 人名 ——
-    ("P0", "客户名", re.compile(r"CustomerA|CustomerB|CustomerC|CustomerD|CustomerE|CustomerF|CustomerG|CustomerH|CustomerI|CustomerJ|CustomerK")),
-    ("P0", "真实人名", re.compile(r"YourName|YourName")),
-    ("P0", "学校/个人身份", re.compile(r"YourUniversity")),
+    ("P0", "本机家目录通配", re.compile(r"[Cc]:[\\/]+Users[\\/]+[^\\/\s\"']*[\\/]+(?:Desktop|Downloads|Documents)")),
 
     # —— 凭据 ——
     ("P0", "API Key / Token", re.compile(
@@ -57,12 +70,7 @@ RULES = [
     ("P1", "邮箱（非占位）", re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")),
     ("P1", "座机/热线", re.compile(r"(?:400|800)[\-\s]?\d{3}[\-\s]?\d{4}")),
 
-    # —— 业务细节 ——
-    ("P1", "业务流水线细节", re.compile(r"8\s*篇推文|平台草稿箱|批量草稿|sync-tool|publish-tool")),
-
     # —— 提示级 ——
-    # 「客户台账」是通用功能名（以服务方实体为 root 列客户），不是客户名 → 只提示
-    ("P2", "业务用语（通用，人工确认）", re.compile(r"客户台账|诊断报告")),
     ("P2", "内网 IP", re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d+\.\d+\b")),
     ("P2", "本地端口", re.compile(r"127\.0\.0\.1:(\d+)")),
     ("P2", "TODO/待清理标记", re.compile(r"(?i)(FIXME|XXX|待脱敏|删掉这句)")),
@@ -73,10 +81,36 @@ ALLOW = [
     re.compile(r"#\s*示例"),                # 注释里的示例
     re.compile(r"lines\.append\(\"\[流水线\]\s*产出目录:\s*/path/to"),
     re.compile(r"your[_-]?name|example\.com|占位|PLACEHOLDER", re.I),
+    re.compile(r"users\.noreply\.github\.com"),
 ]
 
 
-def scan_file(path):
+def load_private_terms():
+    """加载本地私有词表（不入库）。返回 (rules, count)；文件不存在则返回 ([], 0)。"""
+    if not os.path.exists(TERMS_FILE):
+        return [], 0
+    rules = []
+    n = 0
+    with open(TERMS_FILE, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("|")
+            if len(parts) != 3:
+                continue
+            level, kind, word = (p.strip() for p in parts)
+            if level not in ("P0", "P1", "P2") or not word:
+                continue
+            try:
+                rules.append((level, kind, re.compile(re.escape(word))))
+                n += 1
+            except re.error:
+                continue
+    return rules, n
+
+
+def scan_file(path, rules):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -86,7 +120,7 @@ def scan_file(path):
     for i, line in enumerate(lines, 1):
         if any(a.search(line) for a in ALLOW):
             continue
-        for level, name, rx in RULES:
+        for level, name, rx in rules:
             for m in rx.finditer(line):
                 hits.append((level, name, i, m.group(0)[:80]))
     return hits
@@ -95,6 +129,9 @@ def scan_file(path):
 def main():
     show_all = "--all" in sys.argv
     verbose = "-v" in sys.argv
+
+    private, pcount = load_private_terms()
+    rules = RULES + private
 
     results = {}
     scanned = 0
@@ -105,15 +142,21 @@ def main():
             rel = os.path.relpath(p, ROOT).replace("\\", "/")
             if os.path.splitext(f)[1].lower() in SKIP_EXT:
                 continue
-            if rel in WHITELIST_FILES:
+            if rel in WHITELIST_FILES or rel in LOCAL_ONLY \
+                    or rel.endswith(LOCAL_ONLY_SUFFIX):
                 continue
             scanned += 1
-            h = scan_file(p)
+            h = scan_file(p, rules)
             if h:
                 results[rel] = h
 
     print("=" * 78)
-    print("发布前脱敏检验　｜　扫描 %d 个文件（跳过 .git/数据库/二进制/白名单）" % scanned)
+    print("发布前脱敏检验　｜　扫描 %d 个文件（跳过 .git/数据库/二进制）" % scanned)
+    if pcount:
+        print("私有词表：已加载 %d 条（sanitize_terms.local.txt）" % pcount)
+    else:
+        print("私有词表：⚠️ 未找到 sanitize_terms.local.txt —— 只跑通用规则，"
+              "查不出特定公司/客户名")
     print("=" * 78)
 
     if not results:

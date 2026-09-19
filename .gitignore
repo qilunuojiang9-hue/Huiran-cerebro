@@ -25,6 +25,11 @@ archive/
 *.log
 web_server.log
 
+# ---- 私有脱敏词表（含公司名/客户名/人名，绝不发布）----
+sanitize_terms.local.txt
+*.local.txt
+*.local.json
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
