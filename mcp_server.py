@@ -2,7 +2,7 @@
 """
 赛博大脑 MCP 服务器（Cyber Brain MCP Server）
 ================================================
-把赛博大脑（C:/cyber-brain/cyber_brain.db）的能力暴露为标准 MCP 工具，
+把赛博大脑（本项目目录下的 cyber_brain.db）的能力暴露为标准 MCP 工具，
 供豆包（Doubao）等支持 MCP 的客户端连接使用。
 
 传输方式：HTTP（streamable HTTP，fastmcp 默认），豆包「自定义连接器」选 HTTP 即可。

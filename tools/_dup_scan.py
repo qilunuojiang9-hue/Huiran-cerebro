@@ -2,10 +2,12 @@
 只报告重复候选，不修改数据库。
 输出：精确重复组 + 近似重复候选(SequenceMatcher>=0.6)。
 """
+import os
 import sqlite3, difflib
 from collections import defaultdict
 
-DB = "C:/cyber-brain/cyber_brain.db"
+# 数据库按「脚本所在目录的上一级」定位，避免写死本机路径
+DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cyber_brain.db")
 db = sqlite3.connect(DB)
 db.row_factory = sqlite3.Row
 rows = [dict(r) for r in db.execute(
