@@ -6,8 +6,9 @@
      任何 P0/P1 命中都应该先处理掉再发布。
 
 用法：
-    python tools/check_sanitize.py            # 只报 P0/P1（默认）
+    python tools/check_sanitize.py            # 只报 P0/P1（默认，扫工作树）
     python tools/check_sanitize.py --all      # 连 P2 提示一起报
+    python tools/check_sanitize.py --history  # **同时扫 git 全历史**（发布前强烈建议）
     python tools/check_sanitize.py -v         # 连原文一起打印（谨慎，别贴到公开地方）
 
 退出码：0 = 干净；1 = 有 P0/P1 命中（可用于 pre-commit / CI）
@@ -30,6 +31,7 @@ clone 本仓库的人没有第 ② 层，脚本会退化成只跑通用规则（
 """
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -126,9 +128,62 @@ def scan_file(path, rules):
     return hits
 
 
+def scan_history(rules):
+    """扫描 git **全历史**里的每一个 blob（含已被删除文件的旧版本）。
+
+    为什么必须单独做这一步：
+        改了当前文件 ≠ 历史里干净了。旧版本仍以 blob 形式留在 .git 里，
+        push 之后任何人都能用 `git log -p` / `git show <sha>` 翻出来。
+        只扫工作树的检验会给出「全绿」的假象。
+    """
+    try:
+        out = subprocess.run(["git", "rev-list", "--objects", "--all"],
+                             cwd=ROOT, capture_output=True, timeout=300).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+
+    entries = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        parts = line.strip().split(" ", 1)
+        if parts and parts[0]:
+            entries.append((parts[0], parts[1] if len(parts) > 1 else ""))
+
+    results = {}
+    nblob = 0
+    for sha, path in entries:
+        t = subprocess.run(["git", "cat-file", "-t", sha], cwd=ROOT,
+                           capture_output=True).stdout.strip()
+        if t != b"blob":
+            continue
+        nblob += 1
+        raw = subprocess.run(["git", "cat-file", "-p", sha], cwd=ROOT,
+                             capture_output=True, timeout=120).stdout
+        try:
+            txt = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            txt = "\n".join(m.group(0).decode("latin-1")
+                            for m in re.finditer(rb"[\x20-\x7e]{6,}", raw))
+        if not txt:
+            continue
+        hits = []
+        for i, line in enumerate(txt.splitlines(), 1):
+            if any(a.search(line) for a in ALLOW):
+                continue
+            for level, name, rx in rules:
+                for m in rx.finditer(line):
+                    hits.append((level, name, i, m.group(0)[:80]))
+        if hits:
+            results["历史blob %s（%s）" % (sha[:8], path or "路径未知")] = hits
+    results["__nblob__"] = nblob      # 元信息，输出时剔除
+    return results
+
+
 def main():
     show_all = "--all" in sys.argv
     verbose = "-v" in sys.argv
+    with_history = "--history" in sys.argv
 
     private, pcount = load_private_terms()
     rules = RULES + private
@@ -150,8 +205,20 @@ def main():
             if h:
                 results[rel] = h
 
+    nblob = 0
+    nhist = 0
+    if with_history:
+        hist = scan_history(rules)
+        if hist is None:
+            print("⚠️ --history：无法读取 git 历史（不是仓库 / 没有 commit）")
+        else:
+            nblob = hist.pop("__nblob__", 0)
+            nhist = len(hist)
+            results.update(hist)
+
     print("=" * 78)
-    print("发布前脱敏检验　｜　扫描 %d 个文件（跳过 .git/数据库/二进制）" % scanned)
+    print("发布前脱敏检验　｜　工作树 %d 个文件%s" % (
+        scanned, "　＋　git 历史 %d 个 blob" % nblob if with_history else ""))
     if pcount:
         print("私有词表：已加载 %d 条（sanitize_terms.local.txt）" % pcount)
     else:
@@ -174,6 +241,8 @@ def main():
         print()
         print("  📄 %s" % rel)
         seen = set()
+        shown = 0
+        limit = 6 if rel.startswith("历史blob") else 10 ** 9
         for level, name, ln, txt in sorted(hits, key=lambda x: (order[x[0]], x[2])):
             key = (level, name, ln)
             if key in seen:
@@ -185,9 +254,14 @@ def main():
                 p1 += 1
             else:
                 p2 += 1
+            if shown >= limit:
+                continue
+            shown += 1
             mark = {"P0": "🔴", "P1": "🟠", "P2": "🟡"}[level]
             print("     %s [%s] %-22s 第%d行  %s" % (mark, level, name, ln,
                   txt if verbose else txt[:52]))
+        if shown < len(seen):
+            print("     ……（该版本另有 %d 处命中未逐条列出）" % (len(seen) - shown))
 
     print()
     print("-" * 78)
