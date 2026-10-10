@@ -55,7 +55,8 @@ def is_dup(b, text, date):
     subject = (text[:40] if len(text) > 40 else text).strip()
     today_events = b.con.execute(
         "SELECT subject, content FROM memory_fragments "
-        "WHERE fragment_type='event' AND status='active' AND created_at LIKE ?",
+        "WHERE fragment_type='event' AND status='active' AND deleted_at IS NULL "
+        "AND created_at LIKE ?",
         (date + "%",)).fetchall()
     for (exist_subject, content) in today_events:
         if not content:
@@ -118,7 +119,8 @@ def today(db_path=None):
     date = datetime.date.today().isoformat()
     rows = b.con.execute(
         "SELECT id, content, created_at FROM memory_fragments "
-        "WHERE fragment_type='event' AND status='active' AND created_at LIKE ? ORDER BY id",
+        "WHERE fragment_type='event' AND status='active' AND deleted_at IS NULL "
+        "AND created_at LIKE ? ORDER BY id",
         (date + "%",)).fetchall()
     return [dict(r) for r in rows]
 
@@ -128,7 +130,8 @@ def recent(limit=10, db_path=None):
     b = CyberBrain(db_path or DB)
     rows = b.con.execute(
         "SELECT id, content, created_at FROM memory_fragments "
-        "WHERE fragment_type='event' AND status='active' ORDER BY id DESC LIMIT ?",
+        "WHERE fragment_type='event' AND status='active' AND deleted_at IS NULL "
+        "ORDER BY id DESC LIMIT ?",
         (limit,)).fetchall()
     return [dict(r) for r in rows]
 

@@ -113,6 +113,7 @@ def add_memory(
     tags: str = "",
     entities: str = "",
     source_ref: str = "mcp-doubao",
+    namespace: str = "",
 ) -> int:
     """写入一条记忆碎片。ftype 必须是：fact/preference/emotion/knowledge/decision/iron_rule/event/pitfall。
 
@@ -123,12 +124,15 @@ def add_memory(
         tags: 逗号分隔标签，如 "项目,调研"。
         entities: 逗号分隔关联实体名，如 "张三,方案A"。
         source_ref: 来源（默认 mcp-doubao，可写 doubao-export 等）。
+        namespace: 记忆分区（可选，默认落在 default；用于隔离不同用途的记忆）。
 
     提示（豆包端）：用 ftype=event + content="今天做了..." 可等价于 session_log 打卡。
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     ent_list = [e.strip() for e in entities.split(",") if e.strip()] if entities else None
-    return brain().add_fragment(ftype, content, subject=subject, tags=tag_list, entities=ent_list, source_ref=source_ref)
+    return brain().add_fragment(ftype, content, subject=subject, tags=tag_list,
+                                entities=ent_list, source_ref=source_ref,
+                                namespace=namespace or None)
 
 
 # ---------------------------------------------------------------- 工具 4：写入文档
@@ -142,6 +146,7 @@ def add_content(
     tags: str = "",
     entity_ids: str = "",
     source_tag: str = "mcp-doubao",
+    namespace: str = "",
 ) -> int:
     """写入知识库文档（长文/报告/资料）。
 
@@ -154,13 +159,14 @@ def add_content(
         tags: 逗号分隔标签。
         entity_ids: 逗号分隔实体 ID（关联实体）。
         source_tag: 来源标记（默认 mcp-doubao）。
+        namespace: 记忆分区（可选，默认落在 default）。
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     ent_ids = [int(x.strip()) for x in entity_ids.split(",") if x.strip().isdigit()] if entity_ids else None
     return brain().add_content(
         title=title, body=body, ctype=ctype, status=status,
         category=category or None, tags=tag_list, entity_ids=ent_ids,
-        source_tag=source_tag,
+        source_tag=source_tag, namespace=namespace or None,
     )
 
 

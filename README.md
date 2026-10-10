@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/版本-v1.7.1-4B8BF5" alt="version">
+  <img src="https://img.shields.io/badge/版本-v1.8.0-4B8BF5" alt="version">
   <img src="https://img.shields.io/badge/语言-Python%203.10%2B-3776AB" alt="python">
   <img src="https://img.shields.io/badge/许可证-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/数据库-SQLite%20%2B%20FTS5%20trigram-blue" alt="db">
@@ -142,6 +142,25 @@ python cyber_brain.py --db cyber_brain.db doc --add --title "文档名" --text "
 # 记忆碎片（importance 自动分级）
 python cyber_brain.py --db cyber_brain.db frag --add --type decision --content "决定采用方案A" --subject work
 
+# 记忆分区：不传 namespace 落在 default（检索不传则看全部）
+python cyber_brain.py --db cyber_brain.db frag --add --type fact --content "..." --namespace work
+python cyber_brain.py --db cyber_brain.db search "关键词" --namespace work
+python cyber_brain.py --db cyber_brain.db recall "主题" --namespace work
+
+# 墓碑（软删除）：删掉只打标记，正文保留、可恢复
+python cyber_brain.py --db cyber_brain.db frag --delete 12
+python cyber_brain.py --db cyber_brain.db frag --deleted          # 列出墓碑
+python cyber_brain.py --db cyber_brain.db frag --restore 12
+
+# 人工确认：待审碎片不进检索，批准后才激活
+python cyber_brain.py --db cyber_brain.db lifecycle --submit-review 12
+python cyber_brain.py --db cyber_brain.db lifecycle --review      # 列出待审
+python cyber_brain.py --db cyber_brain.db lifecycle --approve 12  # 或 --reject 12
+
+# 变更审计（谁改了什么）
+python cyber_brain.py --db cyber_brain.db mutations --limit 20
+python cyber_brain.py --db cyber_brain.db mutations --action add
+
 # 滚动摘要（收尾写一条，次日 recall 带回）
 python cyber_brain.py --db cyber_brain.db summary --add --scope work --summary "今天完成了..."
 
@@ -232,7 +251,7 @@ kb_document ─< kb_chunk ─< kb_embedding  # RAG 知识库（向量列预留�
 ai_conversation                          # AI 会话落库
 master_data / keyword_pack               # 字典 / 关键词组
 ingest_source / ingest_record            # 数据接入 + 授权登记
-memory_fragments (+ fragment_fts)        # 记忆碎片（8 类，含 importance/namespace）
+memory_fragments (+ fragment_fts)        # 记忆碎片（8 类，含 importance/namespace/deleted_at）
 rolling_summaries                        # 滚动摘要 checkpoint
 memory_relations                         # 碎片间关系
 memory_retrieval_audits                  # 检索留痕（审计可视化数据源）

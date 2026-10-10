@@ -448,6 +448,214 @@ finally:
 
 # ─────────────────────────────────────────────────────────────
 print()
+print("【9】墓碑：软删除不物理消失，且所有读取都尊重它（对应 tombstone）")
+print("-" * 74)
+db_path = fresh_db()
+db = CyberBrain(db_path)
+try:
+    # 用 iron_rule 类型：它本来会出现在 daily_context 的「铁律」区块里，
+    # 这样「删除后不再出现」的断言才有意义（普通 fact 本来就不进那个区块）
+    fid = db.add_fragment("iron_rule", "墓碑测试：这条稍后会被软删除",
+                          source_ref="iron_rules/test")
+    fid2 = db.add_fragment("iron_rule", "墓碑测试：这条会保留",
+                           source_ref="iron_rules/test")
+
+    # ① 先确认删除前它确实能被各处看到（基线）
+    before_ctx = "\n".join(db.daily_context())
+    check("基线：删除前 daily_context 含该铁律",
+          "这条稍后会被软删除" in before_ctx)
+
+    # ② 软删除
+    n = db.delete_fragment(fid)
+    check("delete_fragment 返回受影响行数 1", n == 1, "返回 %s" % n)
+
+    # ③ 关键：行还在（这是墓碑与物理删除的分水岭）
+    row = db.con.execute(
+        "SELECT content, deleted_at FROM memory_fragments WHERE id=?", (fid,)).fetchone()
+    check("★ 正文仍留在库里（不是物理删除）",
+          row is not None and "这条稍后会被软删除" in (row["content"] or ""),
+          "row=%s" % (dict(row) if row else None))
+    check("★ 留下删除时间戳 deleted_at", bool(row and row["deleted_at"]),
+          "deleted_at=%r" % (row["deleted_at"] if row else None))
+
+    # ④ 所有读取路径都不再返回它
+    ids_list = {r["id"] for r in db.list_fragments(limit=50)}
+    check("★ list_fragments 不再返回墓碑", fid not in ids_list and fid2 in ids_list,
+          "列表 id=%s" % sorted(ids_list))
+
+    hit_ids = {h["id"] for h in db.search_memory("墓碑测试", limit=20, audit=False)}
+    check("★ search_memory 不再返回墓碑", fid not in hit_ids, "命中 id=%s" % sorted(hit_ids))
+
+    ctx = "\n".join(db.daily_context())
+    check("★ daily_context 不再含墓碑内容（会话启动上下文也必须过滤）",
+          "这条稍后会被软删除" not in ctx)
+
+    # ⑤ 墓碑可查、可恢复
+    dels = db.list_deleted_fragments()
+    check("list_deleted_fragments 能列出墓碑", any(d["id"] == fid for d in dels))
+
+    n = db.restore_fragment(fid)
+    check("restore_fragment 返回 1", n == 1, "返回 %s" % n)
+    hit_ids2 = {h["id"] for h in db.search_memory("墓碑测试", limit=20, audit=False)}
+    check("★ 恢复后又能被检索到", fid in hit_ids2)
+    check("恢复后 daily_context 又包含它",
+          "这条稍后会被软删除" in "\n".join(db.daily_context()))
+
+    # ⑥ 变更审计
+    actions = {m["action"] for m in db.list_mutations(50)}
+    check("变更审计记录了 delete 与 restore",
+          "delete" in actions and "restore" in actions, "actions=%s" % sorted(actions))
+finally:
+    try:
+        db.con.close()
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+# ⑦ 源码级护栏：所有 memory_fragments 查询都必须带 deleted_at 谓词。
+#    1.6.0 补 status 谓词时就漏掉了会话启动的 context builder，外部审查专门点过名
+#    （"the missing predicate was in the session-start context builder rather than in a
+#      search path"）。这里用不变量守住，避免同类遗漏再发生。
+_bad = []
+for _f in ("cyber_brain.py", "web_ui.py", "session_log.py", "daily_brief.py", "summarize.py"):
+    try:
+        with open(os.path.join(ROOT, _f), encoding="utf-8") as _fh:
+            _src = _fh.read()
+    except OSError:
+        continue
+    for _m in _re.finditer(r"FROM memory_fragments", _src):
+        if "deleted_at" not in _src[_m.start():_m.start() + 220]:
+            _bad.append("%s:%d" % (_f, _src[:_m.start()].count("\n") + 1))
+check("★ 所有 memory_fragments 查询都带 deleted_at 谓词（源码级护栏）",
+      not _bad, "遗漏位置: %s" % ", ".join(_bad))
+
+# ─────────────────────────────────────────────────────────────
+print()
+print("【10】人工确认：待审碎片不进检索，批准后才激活（对应 human_review）")
+print("-" * 74)
+db_path = fresh_db()
+db = CyberBrain(db_path)
+try:
+    fid = db.add_fragment("iron_rule", "人工确认测试：这条需要先审",
+                          source_ref="iron_rules/test")
+    st0 = db.con.execute("SELECT status FROM memory_fragments WHERE id=?", (fid,)).fetchone()["status"]
+    check("基线：初始状态为 active", st0 == "active", "status=%s" % st0)
+    check("基线：此时 daily_context 含它",
+          "这条需要先审" in "\n".join(db.daily_context()))
+
+    # ① 提交待审
+    n = db.submit_for_review(fid)
+    check("submit_for_review 返回 1", n == 1, "返回 %s" % n)
+    st = db.con.execute("SELECT status FROM memory_fragments WHERE id=?", (fid,)).fetchone()["status"]
+    check("★ 状态变为 pending_review", st == "pending_review", "status=%s" % st)
+
+    # ② 待审期间不进任何检索
+    hit_ids = {h["id"] for h in db.search_memory("人工确认测试", limit=20, audit=False)}
+    check("★ 检索不返回待审碎片", fid not in hit_ids, "命中=%s" % sorted(hit_ids))
+    check("★ daily_context 不含待审碎片（会话启动上下文也要尊重它）",
+          "这条需要先审" not in "\n".join(db.daily_context()))
+    check("list_fragments（默认 active）不含待审碎片",
+          fid not in {r["id"] for r in db.list_fragments(limit=50)})
+
+    # ③ 待审队列能列出它
+    pend = db.list_pending_reviews()
+    check("★ list_pending_reviews 能列出待审碎片", any(p["id"] == fid for p in pend),
+          "待审队列=%s" % [p["id"] for p in pend])
+
+    # ④ 批准 → 重新激活
+    n = db.approve_fragment(fid)
+    check("approve_fragment 返回 1", n == 1, "返回 %s" % n)
+    st = db.con.execute("SELECT status FROM memory_fragments WHERE id=?", (fid,)).fetchone()["status"]
+    check("★ 批准后回到 active", st == "active", "status=%s" % st)
+    check("★ 批准后重新被检索到",
+          fid in {h["id"] for h in db.search_memory("人工确认测试", limit=20, audit=False)})
+    check("批准后 daily_context 又包含它",
+          "这条需要先审" in "\n".join(db.daily_context()))
+
+    # ⑤ 驳回路径
+    db.submit_for_review(fid)
+    n = db.reject_fragment(fid)
+    check("reject_fragment 返回 1", n == 1, "返回 %s" % n)
+    st = db.con.execute("SELECT status FROM memory_fragments WHERE id=?", (fid,)).fetchone()["status"]
+    check("★ 驳回后状态为 rejected", st == "rejected", "status=%s" % st)
+    check("★ 被驳回的碎片同样不被检索",
+          fid not in {h["id"] for h in db.search_memory("人工确认测试", limit=20, audit=False)})
+
+    # ⑥ 幂等保护：非 active 的不能再提交待审
+    n = db.submit_for_review(fid)
+    check("非 active 状态提交待审返回 0（幂等保护）", n == 0, "返回 %s" % n)
+
+    # ⑦ 变更审计
+    actions = {m["action"] for m in db.list_mutations(50)}
+    check("变更审计记录 submit_review / approve / reject",
+          {"submit_review", "approve", "reject"} <= actions, "actions=%s" % sorted(actions))
+finally:
+    try:
+        db.con.close()
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+# ─────────────────────────────────────────────────────────────
+print()
+print("【11】老库迁移：缺 deleted_at 列的老表必须能正常打开")
+print("-" * 74)
+# 直接构造一个「按旧结构建、没有 deleted_at 列」的库。
+# 这正是本次开发中踩到的坑：索引若写在 SCHEMA 里，SCHEMA 会在迁移**之前**执行，
+# 老库此时没有该列 → CREATE INDEX 报 "no such column: deleted_at" → **整个库打不开**。
+# 而纯新库测试（CREATE TABLE 时就带该列）永远发现不了这个问题。
+db_path = fresh_db()
+_old = sqlite3.connect(db_path)
+_old.executescript("""
+CREATE TABLE memory_fragments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fragment_type TEXT NOT NULL DEFAULT 'fact',
+  subject TEXT DEFAULT 'work',
+  content TEXT NOT NULL,
+  entities TEXT DEFAULT '[]',
+  tags TEXT DEFAULT '[]',
+  status TEXT DEFAULT 'active',
+  source_ref TEXT,
+  embedding_state TEXT DEFAULT 'disabled',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+INSERT INTO memory_fragments(fragment_type, content) VALUES('fact','老库里的碎片');
+""")
+_old.commit()
+_old.close()
+
+_db2 = None
+try:
+    _db2 = CyberBrain(db_path)          # ← 修复前这一行会抛 OperationalError
+    check("★ 缺 deleted_at 列的老库能正常打开（不抛 no such column）", True)
+    _cols = [r[1] for r in _db2.con.execute("PRAGMA table_info(memory_fragments)")]
+    check("★ 迁移补上了 deleted_at 列", "deleted_at" in _cols, "列=%s" % _cols)
+    check("老数据保留", _db2.con.execute("SELECT COUNT(*) FROM memory_fragments").fetchone()[0] == 1)
+    check("老数据默认未被删除（deleted_at 为 NULL）",
+          all(r["deleted_at"] is None
+              for r in _db2.con.execute("SELECT deleted_at FROM memory_fragments")))
+    check("迁移建立了 idx_frag_deleted 索引",
+          any(r[1] == "idx_frag_deleted"
+              for r in _db2.con.execute("PRAGMA index_list(memory_fragments)")))
+    check("老库打开后检索仍可用",
+          _db2.con.execute("SELECT COUNT(*) FROM memory_fragments WHERE deleted_at IS NULL").fetchone()[0] == 1)
+except Exception as _e:
+    check("★ 缺 deleted_at 列的老库能正常打开（不抛 no such column）", False,
+          "%s: %s" % (type(_e).__name__, _e))
+finally:
+    if _db2 is not None:
+        try:
+            _db2.con.close()
+        except Exception:
+            pass
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+# ─────────────────────────────────────────────────────────────
+print()
 print("=" * 74)
 print("结果：通过 %d ｜ 失败 %d" % (len(PASS), len(FAIL)))
 print("=" * 74)

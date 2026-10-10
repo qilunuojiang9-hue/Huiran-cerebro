@@ -5,6 +5,73 @@
 
 ---
 
+## [1.8.0] — 2026-10-10
+
+> **机制补全版本（收官）**。补上外部审查 7 项 rubric 机制中最后两项，
+> 并修掉 6 个在评审外部 PR 时端到端实测挖出的缺陷。
+> 按语义化规则记为 **minor**（新增能力，向后兼容）。
+
+至此，Agent Memory Atlas（2026-09-28 审查）指出的 **7 项机制全部落地**。
+
+### 新增：墓碑（软删除）—— `tombstone`（#3）
+
+审查原文：
+
+> "`tombstone`：删除留下可审计的墓碑，而不是物理消失。"
+
+- `memory_fragments` 增加 `deleted_at` 列（幂等迁移，**已用真实库验证数据零丢失**）；
+- `delete_fragment()` 打标记而非物理删除 —— 行与正文都保留，
+  「这条记忆曾经存在过、何时被删」可以查证，误删也能恢复；
+- `restore_fragment()` / `list_deleted_fragments()`；
+- **所有读取路径统一加 `deleted_at IS NULL` 谓词**（10 个文件 20 余处），
+  并用**源码级护栏测试**守住，防止未来新增读取点时遗漏。
+- CLI：`frag --delete <id>` / `--restore <id>` / `--deleted`。
+
+### 新增：人工确认 —— `human_review`（#4）
+
+审查原文：
+
+> "`human_review` is withheld ... **No state waits on a reviewer.**"
+
+- 新增状态 `pending_review` / `rejected`；
+- `submit_for_review()` / `approve_fragment()` / `reject_fragment()` / `list_pending_reviews()`；
+- 检索侧只认 `active`，所以待审碎片**天然不会**出现在检索与开工上下文里，
+  人工确认后才激活；
+- CLI：`lifecycle --submit-review <id>` / `--review` / `--approve <id>` / `--reject <id>`。
+
+### 修复
+
+- **`link()` 幂等**（#5）：同一起点重复调用不再新增记录。
+  此前 `import` 命令重复运行会不断累积 `entity_link`，
+  并把旧行关成零宽区间 `[d, d)`（左闭右开下永远不成立）。
+  新增 `lifecycle --clean-zero-width` 清理存量死数据。
+- **迁移失败不再静默**（#6）：启动迁移统一走 `_migrate()`，失败会把
+  迁移名与原因打到 stderr。此前 `except Exception: pass` 让「约束没生效」
+  与「一切正常」长得一模一样。
+- **MCP 写入透传 `namespace`**（#7）：`add_memory` / `add_content`
+  此前没把该参数传下去，导致通过 MCP 客户端无法写入指定分区。
+- **`search` / `recall` 支持 `--namespace`**（#8）：
+  底层一直支持，只是 CLI 这层没接 —— 此前命令行用户实际上用不了分区隔离。
+- **`update_content` 的列名解析**（#11）：改为按实际表结构判断，
+  不再硬编码 `_json` 后缀。此前 `entity_ids` 会拼成 `entity_ids_json`
+  并抛 `OperationalError`（该字段列名不带后缀）。
+- **`conv --append` 不再误报成功**（#13）：会话不存在、或 `--role`/`--text`
+  为空时明确报错并置非零退出码。此前会打印 `appended` 但什么都没做成。
+
+### 测试
+
+`tools/test_cyber_brain.py` 由 51 条增至 **87 条**，新增四个段落：
+
+- 【9】墓碑：正文保留、时间戳、四处读取路径过滤、恢复、审计
+- 【10】人工确认：待审不进检索、批准后激活、驳回、幂等保护、审计
+- 【11】**老库迁移**：构造缺 `deleted_at` 列的老表，验证能正常打开
+- 两处**源码级回归护栏**（`memory_fragments` 查询必须带 `deleted_at` 谓词）
+
+> 两处护栏都经过**负对照验证**：故意移除一处谓词 / 把索引加回 SCHEMA，
+> 测试分别报出具体文件行号与 `no such column` 并以退出码 1 失败。
+
+---
+
 ## [1.7.1] — 2026-10-10
 
 > **谓词补全修复**。由 **@jianghe9165** 贡献（[#9](https://github.com/qilunuojiang9-hue/Huiran-cerebro/pull/9)）。

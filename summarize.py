@@ -56,7 +56,8 @@ def collect_events(b, days):
     since_s = since.isoformat()
     rows = b.con.execute(
         "SELECT id, content, created_at FROM memory_fragments "
-        "WHERE fragment_type='event' AND status='active' ORDER BY id").fetchall()
+        "WHERE fragment_type='event' AND status='active' AND deleted_at IS NULL "
+        "ORDER BY id").fetchall()
     out = []
     for r in rows:
         d = _parse_date(r["created_at"])
@@ -74,7 +75,8 @@ def upgrade_fragments(b, events, dry_run=False):
             if any(k in text for k in kws):
                 # 判重：同类型同内容已存在则跳过
                 dup = b.con.execute(
-                    "SELECT 1 FROM memory_fragments WHERE fragment_type=? AND content=? LIMIT 1",
+                    "SELECT 1 FROM memory_fragments WHERE fragment_type=? AND content=? "
+                    "AND deleted_at IS NULL LIMIT 1",
                     (ftype, text)).fetchone()
                 if dup:
                     continue

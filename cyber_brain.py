@@ -25,7 +25,7 @@ import datetime
 __all__ = ["CyberBrain", "ENTITY_TYPES", "CONTENT_TYPES", "FRAGMENT_TYPES"]
 
 # 版本号单一事实源：改这里，然后跑 tools/check_version.py 同步 README 徽章
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 ENTITY_TYPES = ["person", "org", "project", "account", "platform", "product", "tool", "other"]
 CONTENT_TYPES = ["note", "article", "task", "decision", "meeting", "idea", "issue", "report"]
@@ -200,11 +200,15 @@ CREATE TABLE IF NOT EXISTS memory_fragments (
   embedding_state TEXT DEFAULT 'disabled',
   importance TEXT NOT NULL DEFAULT 'normal',
   namespace TEXT NOT NULL DEFAULT 'default',
+  deleted_at TEXT,     -- 软删除墓碑（#3）：非空 = 已删除；行与正文保留，可审计可恢复
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_frag_type ON memory_fragments(fragment_type);
 CREATE INDEX IF NOT EXISTS idx_frag_status ON memory_fragments(status);
+-- ⚠️ idx_frag_deleted 不能建在这里：SCHEMA 在迁移**之前**执行，
+-- 而老库此时还没有 deleted_at 列，CREATE INDEX 会直接报 "no such column"，
+-- 导致整个库打不开。它由 _mig_fragment_columns 在补列之后建立。
 
 CREATE TABLE IF NOT EXISTS rolling_summaries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -309,100 +313,123 @@ def _now():
 
 
 class CyberBrain:
+    # ------------------------------------------------- 迁移工具
+    def _migrate(self, label, fn):
+        """执行一步迁移；失败时打印警告，而不是静默吞掉（#6）。
+
+        迁移不该阻塞启动，但**必须可见**：用 `except Exception: pass` 时，
+        「约束没生效」和「一切正常」长得一模一样 —— 实际上就出现过部分唯一索引
+        没建上、而调用方毫不知情的情况（那会让「同一关系只保留一条当前有效」
+        这条保证静默失效）。所以这里改为把失败打到 stderr，并带上迁移名与原因。
+        """
+        try:
+            fn()
+        except Exception as e:
+            print("⚠️ 迁移失败 [%s]：%s: %s" % (label, type(e).__name__, e), file=sys.stderr)
+
+    def _mig_entity_link_columns(self):
+        """老库 entity_link 补 valid_from / valid_until 列（幂等）。"""
+        cols = [r[1] for r in self.con.execute("PRAGMA table_info(entity_link)")]
+        if "valid_from" not in cols:
+            self.con.execute("ALTER TABLE entity_link ADD COLUMN valid_from TEXT")
+        if "valid_until" not in cols:
+            self.con.execute("ALTER TABLE entity_link ADD COLUMN valid_until TEXT")
+        self.con.commit()
+
+    def _mig_entity_link_drop_unique(self):
+        """去掉 entity_link 的行级 UNIQUE，改为「部分唯一索引」（幂等）。
+
+        老库的 UNIQUE(from_id,to_id,relation) 让同一关系只能存一行，于是
+        "到期即 DELETE、改期即在原文上覆盖"，一段关系曾经在什么时间段成立无法回溯。
+        对应外部审查（Agent Memory Atlas, 2026-09-28）：
+          "the validity window on entity links is overwritten in place and deleted on
+           expiry, so the period a relation was believed cannot be recovered."
+        这里原地重建该表去掉行级唯一约束：只有检测到 UNIQUE 约束时才跑。
+        """
+        has_unique = any(r[3] == "u" for r in self.con.execute("PRAGMA index_list(entity_link)"))
+        if not has_unique:
+            return
+        self.con.executescript(
+            "BEGIN;"
+            "CREATE TABLE entity_link_rebuild ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  from_id INTEGER NOT NULL REFERENCES entity(id),"
+            "  to_id INTEGER NOT NULL REFERENCES entity(id),"
+            "  relation TEXT NOT NULL,"
+            "  note TEXT,"
+            "  valid_from TEXT,"
+            "  valid_until TEXT,"
+            "  created_at TEXT DEFAULT (datetime('now','localtime')));"
+            "INSERT INTO entity_link_rebuild"
+            " (id,from_id,to_id,relation,note,valid_from,valid_until,created_at)"
+            " SELECT id,from_id,to_id,relation,note,valid_from,valid_until,created_at"
+            " FROM entity_link;"
+            "DROP TABLE entity_link;"
+            "ALTER TABLE entity_link_rebuild RENAME TO entity_link;"
+            "COMMIT;")
+
+    def _mig_entity_link_indexes(self):
+        """entity_link 索引：时间窗检索 + 每个三元组只允许一条「当前有效」记录。"""
+        self.con.executescript(
+            "CREATE INDEX IF NOT EXISTS idx_entity_link_valid ON entity_link(valid_until);"
+            "CREATE INDEX IF NOT EXISTS idx_entity_link_from ON entity_link(from_id);"
+            "CREATE INDEX IF NOT EXISTS idx_entity_link_to ON entity_link(to_id);"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_link_open"
+            " ON entity_link(from_id,to_id,relation) WHERE valid_until IS NULL;")
+        self.con.commit()
+
+    def _mig_fragment_columns(self):
+        """老库 memory_fragments 补 importance / namespace / deleted_at 列（幂等）。"""
+        cols = [r[1] for r in self.con.execute("PRAGMA table_info(memory_fragments)")]
+        if "importance" not in cols:
+            self.con.execute("ALTER TABLE memory_fragments ADD COLUMN importance TEXT NOT NULL DEFAULT 'normal'")
+        if "namespace" not in cols:
+            self.con.execute("ALTER TABLE memory_fragments ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'")
+        if "deleted_at" not in cols:
+            # 软删除墓碑（#3）：删除只打标记，行与正文都留着，可审计、可回溯
+            self.con.execute("ALTER TABLE memory_fragments ADD COLUMN deleted_at TEXT")
+        self.con.execute("CREATE INDEX IF NOT EXISTS idx_frag_deleted ON memory_fragments(deleted_at)")
+        self.con.commit()
+
+    def _mig_entity_namespace_columns(self):
+        """给 entity / content_item / kb_document 补 namespace 列（幂等）。
+
+        此前 namespace 只声明在 memory_fragments 上，但统一搜索的 scoped 分支
+        会向这些表发送 "AND namespace=?"，于是带 namespace 调用直接 SQL 报错
+        （外部审查："The scoped branch of the unified search names a column those tables lack."）。
+        """
+        for tbl in ("entity", "content_item", "kb_document"):
+            _cols = [r[1] for r in self.con.execute("PRAGMA table_info(%s)" % tbl)]
+            if _cols and "namespace" not in _cols:
+                self.con.execute("ALTER TABLE %s ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'" % tbl)
+        self.con.commit()
+
+    def _mig_sys_profile(self):
+        """AI 电脑中枢：初始化默认系统台账（幂等）。"""
+        if not self.con.execute("SELECT 1 FROM sys_profile WHERE key='role'").fetchone():
+            self.con.execute(
+                "INSERT INTO sys_profile(key,value,kind,note) VALUES('role','电脑中枢','setting',"
+                "'定位：AI 电脑的大脑（记忆+模型路由+硬件探针）')")
+            self.con.commit()
+
+    # ------------------------------------------------- 生命周期
     def __init__(self, db_path):
         self.db_path = db_path
         self.con = sqlite3.connect(db_path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys=ON")
         self.con.executescript(SCHEMA)
-        # 迁移：老库 entity_link 补 valid_from / valid_until 列（幂等）
-        try:
-            cols = [r[1] for r in self.con.execute("PRAGMA table_info(entity_link)")]
-            if "valid_from" not in cols:
-                self.con.execute("ALTER TABLE entity_link ADD COLUMN valid_from TEXT")
-            if "valid_until" not in cols:
-                self.con.execute("ALTER TABLE entity_link ADD COLUMN valid_until TEXT")
-            self.con.commit()
-        except Exception:
-            pass
-
-        # 迁移：老库 entity_link 带着 UNIQUE(from_id,to_id,relation)，同一关系只能存一行，
-        # 于是"到期即 DELETE、改期即在原文上覆盖"，一段关系曾经在什么时间段成立无法回溯。
-        # 对应外部审查（Agent Memory Atlas, 2026-09-28）：
-        #   "the validity window on entity links is overwritten in place and deleted on expiry,
-        #    so the period a relation was believed cannot be recovered."
-        # 这里原地重建该表去掉行级唯一约束（幂等：只有检测到 UNIQUE 约束时才跑）。
-        try:
-            _has_unique = any(r[3] == "u"
-                              for r in self.con.execute("PRAGMA index_list(entity_link)"))
-            if _has_unique:
-                self.con.executescript(
-                    "BEGIN;"
-                    "CREATE TABLE entity_link_rebuild ("
-                    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "  from_id INTEGER NOT NULL REFERENCES entity(id),"
-                    "  to_id INTEGER NOT NULL REFERENCES entity(id),"
-                    "  relation TEXT NOT NULL,"
-                    "  note TEXT,"
-                    "  valid_from TEXT,"
-                    "  valid_until TEXT,"
-                    "  created_at TEXT DEFAULT (datetime('now','localtime')));"
-                    "INSERT INTO entity_link_rebuild"
-                    " (id,from_id,to_id,relation,note,valid_from,valid_until,created_at)"
-                    " SELECT id,from_id,to_id,relation,note,valid_from,valid_until,created_at"
-                    " FROM entity_link;"
-                    "DROP TABLE entity_link;"
-                    "ALTER TABLE entity_link_rebuild RENAME TO entity_link;"
-                    "COMMIT;")
-        except Exception:
-            pass
-
-        # entity_link 索引：时间窗检索 + 每个三元组只允许一条"当前有效"记录
-        try:
-            self.con.executescript(
-                "CREATE INDEX IF NOT EXISTS idx_entity_link_valid ON entity_link(valid_until);"
-                "CREATE INDEX IF NOT EXISTS idx_entity_link_from ON entity_link(from_id);"
-                "CREATE INDEX IF NOT EXISTS idx_entity_link_to ON entity_link(to_id);"
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_link_open"
-                " ON entity_link(from_id,to_id,relation) WHERE valid_until IS NULL;")
-            self.con.commit()
-        except Exception:
-            pass
-        # 迁移：老库 memory_fragments 补 importance / namespace 列（幂等）
-        try:
-            cols = [r[1] for r in self.con.execute("PRAGMA table_info(memory_fragments)")]
-            if "importance" not in cols:
-                self.con.execute("ALTER TABLE memory_fragments ADD COLUMN importance TEXT NOT NULL DEFAULT 'normal'")
-            if "namespace" not in cols:
-                self.con.execute("ALTER TABLE memory_fragments ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'")
-            self.con.commit()
-        except Exception:
-            pass
-
-        # 迁移：给 entity / content_item / kb_document 补 namespace 列（幂等）
-        # 2026-10-05 修：此前 namespace 只声明在 memory_fragments 上，但统一搜索的 scoped 分支
-        # 会向这些表发送 "AND namespace=?"，于是带 namespace 调用直接 SQL 报错
-        # （外部审查："The scoped branch of the unified search names a column those tables lack."）
-        for _tbl in ("entity", "content_item", "kb_document"):
-            try:
-                _cols = [r[1] for r in self.con.execute("PRAGMA table_info(%s)" % _tbl)]
-                if _cols and "namespace" not in _cols:
-                    self.con.execute(
-                        "ALTER TABLE %s ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'" % _tbl)
-            except Exception:
-                pass
-        self.con.commit()
+        # 迁移统一走 _migrate：失败会打印警告，不再静默吞掉（#6）
+        self._migrate("entity_link 补 valid_from/valid_until 列", self._mig_entity_link_columns)
+        self._migrate("entity_link 去掉行级唯一约束", self._mig_entity_link_drop_unique)
+        self._migrate("entity_link 索引", self._mig_entity_link_indexes)
+        self._migrate("memory_fragments 补 importance/namespace/deleted_at 列",
+                      self._mig_fragment_columns)
+        self._migrate("entity/content_item/kb_document 补 namespace 列",
+                      self._mig_entity_namespace_columns)
+        self._migrate("系统台账默认值", self._mig_sys_profile)
         self.con.commit()
         self._vec_engine = None
-        # AI 电脑中枢：初始化默认系统台账（幂等）
-        try:
-            if not self.con.execute("SELECT 1 FROM sys_profile WHERE key='role'").fetchone():
-                self.con.execute(
-                    "INSERT INTO sys_profile(key,value,kind,note) VALUES('role','电脑中枢','setting',"
-                    "'定位：AI 电脑的大脑（记忆+模型路由+硬件探针）')")
-                self.con.commit()
-        except Exception:
-            pass
 
     # ------------------------------------------------- 实体
     def add_entity(self, etype, name, org=None, role=None, contact=None, tags=None,
@@ -442,7 +469,8 @@ class CyberBrain:
            **不会去动当前有效的那条**（旧实现会在这里 DELETE 掉旧关系，历史就没了）。
         3. 未给 `valid_until` 时，看是否已存在同 (from,to,relation) 的开放区间
            （`valid_until` 为空 = 当前有效）：
-           - 新记录起点不早于旧起点 → 旧记录在新起点处**关闭**（"从这天起改口"），新记录接管；
+           - 新记录起点**与旧起点相同** → 视为重复调用，**幂等返回**（只更新备注）；
+           - 新记录起点晚于旧起点 → 旧记录在新起点处**关闭**（"从这天起改口"），新记录接管；
            - 新记录起点早于旧起点 → 新记录作为历史区间插在旧记录之前，
              其 `valid_until` 缺省取旧记录起点，旧记录保持开放。
         """
@@ -455,7 +483,15 @@ class CyberBrain:
             "ORDER BY id LIMIT 1", (a, b, relation)).fetchone()
         if old and valid_until is None:
             old_vf = old["valid_from"] or vf
-            if vf >= old_vf:
+            if vf == old_vf:
+                # 同一关系、同一起点 → 重复调用，幂等返回（#5）。
+                # 此前每次都「关旧插新」：import 命令重复运行会不断累积记录，
+                # 而且旧行会被关成一个零宽区间 [d, d) —— 左闭右开下永远不成立。
+                if note:
+                    self.con.execute("UPDATE entity_link SET note=? WHERE id=?", (note, old["id"]))
+                    self.con.commit()
+                return old["id"]
+            if vf > old_vf:
                 self.con.execute("UPDATE entity_link SET valid_until=? WHERE id=?", (vf, old["id"]))
             else:
                 vu = old_vf
@@ -493,6 +529,21 @@ class CyberBrain:
         return self.con.execute(
             "SELECT * FROM entity WHERE name LIKE ? OR org LIKE ? ORDER BY updated_at DESC LIMIT ?",
             (like, like, limit)).fetchall()
+
+    def clean_zero_width_links(self):
+        """清除零宽区间关系（`valid_from == valid_until`），返回删除条数。
+
+        时间窗是左闭右开 `[valid_from, valid_until)`，起点终点相同时区间为空集，
+        这类记录在任何 `as_of` 查询里都不会命中 —— 属死数据。
+
+        它们由 #5 描述的 bug 产生：同一关系被重复 `link()` 时，旧行会被关成一个
+        零宽区间。`link()` 现在已幂等、不再产生新的；这个命令用来清理存量。
+        """
+        cur = self.con.execute(
+            "DELETE FROM entity_link "
+            "WHERE valid_until IS NOT NULL AND valid_from = valid_until")
+        self.con.commit()
+        return cur.rowcount
 
     def neighbors(self, eid, as_of=None):
         """返回实体的邻居关系。
@@ -544,32 +595,41 @@ class CyberBrain:
     def get_content(self, cid):
         return self.con.execute("SELECT * FROM content_item WHERE id=?", (cid,)).fetchone()
 
+    # update_content 允许更新的字段。前三个在库里存 JSON 字符串。
+    _CONTENT_JSON_FIELDS = ("tags", "entity_ids", "keyword_refs")
+    _CONTENT_SCALAR_FIELDS = ("title", "body", "status", "category", "platform",
+                              "content_type", "source_type", "source_tag", "authorization_ref")
+
     def update_content(self, cid, **kw):
         if not kw:
             return
         before = self.get_content(cid)
-        sets = []
-        params = []
+        # 列名按**实际表结构**解析，而不是硬编码 `${k}_json` 后缀。
+        # 后缀规则本身就不统一：tags→tags_json、keyword_refs→keyword_refs_json，
+        # 但 entity_ids 的列名就是 entity_ids（不带后缀）。
+        # 硬编码会让 entity_ids 更新时报 "no such column: entity_ids_json"（#11）。
+        cols = {r[1] for r in self.con.execute("PRAGMA table_info(content_item)")}
+        json_fields = self._CONTENT_JSON_FIELDS
+        allowed = json_fields + self._CONTENT_SCALAR_FIELDS
+        sets, params, resolved = [], [], {}
         for k, v in kw.items():
-            if k in ("tags", "entity_ids", "keyword_refs"):
-                sets.append(f"{k}_json=?")
-                params.append(_jl(v))
-            elif k in ("title", "body", "status", "category", "platform", "content_type",
-                       "source_type", "source_tag", "authorization_ref"):
-                sets.append(f"{k}=?")
-                params.append(v)
-            else:
+            if k not in allowed:
                 raise ValueError(f"不支持的字段: {k}")
+            col = k if k in cols else (k + "_json")
+            if col not in cols:
+                raise ValueError(f"字段 {k} 在 content_item 表里没有对应列")
+            resolved[k] = col
+            sets.append(f"{col}=?")
+            params.append(_jl(v) if k in json_fields else v)
         sets.append("updated_at=datetime('now','localtime')")
         params.append(cid)
         self.con.execute(f"UPDATE content_item SET {', '.join(sets)} WHERE id=?", params)
         self.con.commit()
         # 变更审计：记下改了哪些字段、改动前后的值（detail 形如 {"changed": {...}}）
-        if before is not None:
+        if before is not None and resolved:
             changed = {}
-            for k, v in kw.items():
-                col = k + "_json" if k in ("tags", "entity_ids", "keyword_refs") else k
-                new = _jl(v) if col.endswith("_json") else v
+            for k, col in resolved.items():
+                new = _jl(kw[k]) if k in json_fields else kw[k]
                 old = before[col] if col in before.keys() else None
                 if old != new:
                     changed[k] = {"before": old, "after": new}
@@ -687,13 +747,25 @@ class CyberBrain:
         return None
 
     def append_message(self, cid, role, content):
+        """向会话追加一条消息，返回追加后的消息总数。
+
+        会话不存在、或 role/content 为空时抛 ValueError —— 不再静默空转后
+        照样报成功（#13：此前对不存在的 id 追加会 UPDATE 到零行，但仍打印 appended）。
+        """
+        if not role:
+            raise ValueError("role 必填（如 user / assistant）")
+        if not content:
+            raise ValueError("content 必填（不允许写入空消息）")
         row = self.con.execute("SELECT messages_json FROM ai_conversation WHERE id=?", (cid,)).fetchone()
-        msgs = _parse(row["messages_json"], []) if row else []
+        if row is None:
+            raise ValueError(f"会话 id={cid} 不存在")
+        msgs = _parse(row["messages_json"], [])
         msgs.append({"role": role, "content": content, "at": _now()})
         self.con.execute(
             "UPDATE ai_conversation SET messages_json=?, updated_at=datetime('now','localtime') WHERE id=?",
             (_jl(msgs), cid))
         self.con.commit()
+        return len(msgs)
 
     # ------------------------------------------------- 字典 / 关键词
     def add_master(self, category, code, label, sort=0):
@@ -775,8 +847,101 @@ class CyberBrain:
                             "namespace": namespace or "default"})
         return cur.lastrowid
 
-    def list_fragments(self, ftype=None, status="active", limit=50):
-        sql = "SELECT * FROM memory_fragments WHERE 1=1"
+    def delete_fragment(self, fid, note=None):
+        """软删除碎片（留下墓碑），返回受影响行数。
+
+        #3：删除只打标记，**行与正文都保留** —— 这样「这条记忆曾经存在过、
+        何时被删、为什么」可以查证；物理删除一旦误删就再也回溯不了。
+
+        `deleted_at` 非空即视为已删除，所有读取路径都据此过滤。
+        """
+        import datetime as _dt
+        cur = self.con.execute(
+            "UPDATE memory_fragments SET deleted_at=?, updated_at=datetime('now','localtime') "
+            "WHERE id=? AND deleted_at IS NULL",
+            (_dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), fid))
+        self.con.commit()
+        n = cur.rowcount
+        if n:
+            self._log_mutation("delete", "memory_fragment", fid,
+                               {"note": note} if note else None)
+        return n
+
+    def restore_fragment(self, fid):
+        """把已软删除的碎片恢复（清空 deleted_at），返回受影响行数。"""
+        cur = self.con.execute(
+            "UPDATE memory_fragments SET deleted_at=NULL, updated_at=datetime('now','localtime') "
+            "WHERE id=? AND deleted_at IS NOT NULL", (fid,))
+        self.con.commit()
+        n = cur.rowcount
+        if n:
+            self._log_mutation("restore", "memory_fragment", fid)
+        return n
+
+    def list_deleted_fragments(self, limit=50):
+        """列出已软删除的碎片（墓碑），供审计与恢复。"""
+        return self.con.execute(
+            "SELECT id, fragment_type, subject, content, deleted_at FROM memory_fragments "
+            "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?", (limit,)).fetchall()
+
+    # ------------------------------------------------- 人工确认（#4）
+    # 状态机：active ⇄ pending_review →（approve）→ active
+    #                              └→（reject）→ rejected
+    # 检索侧只认 active，所以待审碎片天然不会出现在检索与开工上下文里。
+    REVIEW_PENDING = "pending_review"
+    REVIEW_REJECTED = "rejected"
+
+    def submit_for_review(self, fid, note=None):
+        """把碎片置为「等待人工确认」（返回受影响行数）。
+
+        #4：此前写入路径没有任何人工把关环节 —— 模型自动提取的结论与人工录入的记忆
+        一视同仁地进入检索池。置为 pending_review 后检索不再带它（检索只认 active），
+        等人 `approve_fragment` 才激活。
+        """
+        cur = self.con.execute(
+            "UPDATE memory_fragments SET status=?, updated_at=datetime('now','localtime') "
+            "WHERE id=? AND status='active'", (self.REVIEW_PENDING, fid))
+        self.con.commit()
+        n = cur.rowcount
+        if n:
+            self._log_mutation("submit_review", "memory_fragment", fid,
+                               {"note": note} if note else None)
+        return n
+
+    def approve_fragment(self, fid, note=None):
+        """人工确认通过：pending_review → active（通过后重新进入检索）。"""
+        cur = self.con.execute(
+            "UPDATE memory_fragments SET status='active', updated_at=datetime('now','localtime') "
+            "WHERE id=? AND status=?", (fid, self.REVIEW_PENDING))
+        self.con.commit()
+        n = cur.rowcount
+        if n:
+            self._log_mutation("approve", "memory_fragment", fid,
+                               {"note": note} if note else None)
+        return n
+
+    def reject_fragment(self, fid, note=None):
+        """人工确认驳回：pending_review → rejected（保留正文，可再次提交）。"""
+        cur = self.con.execute(
+            "UPDATE memory_fragments SET status=?, updated_at=datetime('now','localtime') "
+            "WHERE id=? AND status=?", (self.REVIEW_REJECTED, fid, self.REVIEW_PENDING))
+        self.con.commit()
+        n = cur.rowcount
+        if n:
+            self._log_mutation("reject", "memory_fragment", fid,
+                               {"note": note} if note else None)
+        return n
+
+    def list_pending_reviews(self, limit=50):
+        """列出等待人工确认的碎片。"""
+        return self.con.execute(
+            "SELECT id, fragment_type, subject, content, source_ref, created_at "
+            "FROM memory_fragments WHERE status=? AND deleted_at IS NULL "
+            "ORDER BY created_at DESC LIMIT ?", (self.REVIEW_PENDING, limit)).fetchall()
+
+    def list_fragments(self, ftype=None, status="active", limit=50, namespace=None):
+        # deleted_at IS NULL：软删除的墓碑不进入常规列表（#3）
+        sql = "SELECT * FROM memory_fragments WHERE deleted_at IS NULL"
         p = []
         if ftype:
             sql += " AND fragment_type=?"
@@ -784,6 +949,9 @@ class CyberBrain:
         if status:
             sql += " AND status=?"
             p.append(status)
+        if namespace:
+            sql += " AND namespace=?"
+            p.append(namespace)
         sql += " ORDER BY created_at DESC LIMIT ?"
         p.append(limit)
         return self.con.execute(sql, p).fetchall()
@@ -797,11 +965,12 @@ class CyberBrain:
         ids |= set(self._like_ids("memory_fragments", ["content", "tags"], q, limit * 3, namespace=namespace))
         rows = []
         for i in list(ids)[:limit * 4]:
-            r = self.con.execute("SELECT * FROM memory_fragments WHERE id=?", (i,)).fetchone()
-            # 2026-10-05 修：必须过滤 status。此前只查 namespace，导致被标记 merged 的碎片
-            # 照样被搜出来 —— 对应外部审查：
-            # "Were the mark written, the searches would not read it."
-            if r and r["status"] == "active" and (not namespace or r["namespace"] == namespace):
+              r = self.con.execute(
+                  "SELECT * FROM memory_fragments WHERE id=? AND deleted_at IS NULL", (i,)).fetchone()
+              # 2026-10-05 修：必须过滤 status。此前只查 namespace，导致被标记 merged 的碎片
+              # 照样被搜出来 —— 对应外部审查：
+              # "Were the mark written, the searches would not read it."
+              if r and r["status"] == "active" and (not namespace or r["namespace"] == namespace):
                 rows.append(r)
         # P1 decay：importance=high 加权；普通碎片按创建时间衰减（只降权不删除）
         rows.sort(key=lambda r: self._decay_key(r), reverse=True)
@@ -845,8 +1014,8 @@ class CyberBrain:
         """
         import re as _re
         frags = [dict(r) for r in self.con.execute(
-            "SELECT id, fragment_type, content, created_at FROM memory_fragments "
-            "WHERE status='active' AND content IS NOT NULL AND length(content)>=12 "
+              "SELECT id, fragment_type, content, created_at FROM memory_fragments "
+              "WHERE status='active' AND deleted_at IS NULL AND content IS NOT NULL AND length(content)>=12 "
             "ORDER BY id DESC LIMIT ?", (limit,))]
         # 每条提取「敏感属性 → 值集合」
         ann = []
@@ -917,7 +1086,7 @@ class CyberBrain:
         today = _dt.date.today()
         rows = self.con.execute(
             "SELECT id, fragment_type, importance, created_at, content FROM memory_fragments "
-            "WHERE status='active'").fetchall()
+            "WHERE status='active' AND deleted_at IS NULL").fetchall()
         report = {"total": len(rows), "missing_importance": 0, "stale_low": []}
         for r in rows:
             imp = r["importance"] or "normal"
@@ -945,7 +1114,7 @@ class CyberBrain:
         demoted = 0
         rows = self.con.execute(
             "SELECT id, fragment_type, importance, created_at, content FROM memory_fragments "
-            "WHERE status='active'").fetchall()
+            "WHERE status='active' AND deleted_at IS NULL").fetchall()
         for r in rows:
             imp = r["importance"] or "normal"
             if imp not in ("high", "medium", "low", "normal"):
@@ -975,9 +1144,9 @@ class CyberBrain:
         保留先创建者（信息源），后写者合并到它。返回候选对。
         """
         rows = self.con.execute(
-            "SELECT id, content, created_at FROM memory_fragments "
-            "WHERE status='active' AND content IS NOT NULL AND length(content)>=8 "
-            "ORDER BY id ASC").fetchall()
+              "SELECT id, content, created_at FROM memory_fragments "
+              "WHERE status='active' AND deleted_at IS NULL AND content IS NOT NULL AND length(content)>=8 "
+              "ORDER BY id ASC").fetchall()
         cand = []
         merged = 0
         for i in range(len(rows)):
@@ -1089,26 +1258,30 @@ class CyberBrain:
         return self.con.execute(
             "SELECT * FROM memory_mutations ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
-    def recall(self, query=None, top_summaries=2, limit=8, days=None):
+    def recall(self, query=None, top_summaries=2, limit=8, days=None, namespace=None):
         """防遗忘：按请求命中记忆碎片 + 滚动摘要，输出紧凑上下文。
         days>0 时只召回最近 N 天（时间感知 P0-2）；碎片经 RRF 混合排序。
+        namespace 非空时只召回该分区的碎片（与 search_memory 口径一致）。
         """
         lines = []
         for s in self.con.execute(
                 "SELECT * FROM rolling_summaries ORDER BY id DESC LIMIT ?", (top_summaries,)).fetchall():
             lines.append(f"[滚动摘要 v{s['checkpoint_version']} · {s['scope_key']}] {s['summary']}")
-        frags = self.search_memory(query, limit=limit, audit=False, days=days) if query else self.list_fragments(limit=limit)
+        frags = (self.search_memory(query, limit=limit, audit=False, days=days, namespace=namespace)
+                 if query else self.list_fragments(limit=limit, namespace=namespace))
         if query:
             seen = {f["id"] for f in frags}
             try:
-                for h in self.search_semantic(query, limit=limit, target_types=["memory_fragment"]):
+                for h in self.search_semantic(query, limit=limit, target_types=["memory_fragment"],
+                                              namespace=namespace):
                     if h["id"] in seen:
                         continue
                     row = self.con.execute(
                         # 语义检索这条支路也必须过滤 status —— 否则「已合并的碎片会保留向量、
                         # 仍被按 id 取回」（外部审查原话：a fragment merged before its first
                         # indexing gets no embedding, but one indexed earlier keeps its vector）
-                        "SELECT content FROM memory_fragments WHERE id=? AND status='active'",
+                        "SELECT content FROM memory_fragments WHERE id=? AND status='active' "
+                        "AND deleted_at IS NULL",
                         (h["id"],)).fetchone()
                     if row:
                         frags.append({"fragment_type": "semantic", "id": h["id"], "content": row["content"]})
@@ -1362,7 +1535,7 @@ class CyberBrain:
             rows.append(("content", r["id"], (r["title"] or "") + "\n" + (r["body"] or "")))
         for r in self.con.execute("SELECT id, content FROM kb_chunk"):
             rows.append(("kb_chunk", r["id"], r["content"] or ""))
-        for r in self.con.execute("SELECT id, content FROM memory_fragments WHERE status='active'"):
+        for r in self.con.execute("SELECT id, content FROM memory_fragments WHERE status='active' AND deleted_at IS NULL"):
             rows.append(("memory_fragment", r["id"], r["content"] or ""))
         # 实体（客户/账号/平台等）：name + org + meta 描述拼成检索文本
         for r in self.con.execute("SELECT id, name, org, meta_json FROM entity"):
@@ -1407,8 +1580,9 @@ class CyberBrain:
         与 index_vectors() 配套：索引是增量的，本方法用来查还差哪些。
         """
         return self.con.execute(
-            "SELECT id, fragment_type, subject, created_at FROM memory_fragments "
-            "WHERE status='active' AND (embedding_state IS NULL OR embedding_state != 'indexed') "
+              "SELECT id, fragment_type, subject, created_at FROM memory_fragments "
+              "WHERE status='active' AND deleted_at IS NULL "
+              "AND (embedding_state IS NULL OR embedding_state != 'indexed') "
             "ORDER BY id LIMIT ?", (limit,)).fetchall()
 
     def search_semantic(self, q, limit=10, target_types=None, namespace=None):
@@ -1434,7 +1608,9 @@ class CyberBrain:
                             "SELECT d.namespace FROM kb_chunk c JOIN kb_document d ON d.id=c.doc_id "
                             "WHERE c.id=?", (i,)).fetchone()
                     elif t == "memory_fragment":
-                        row = self.con.execute("SELECT namespace FROM memory_fragments WHERE id=?", (i,)).fetchone()
+                        row = self.con.execute(
+                              "SELECT namespace FROM memory_fragments "
+                              "WHERE id=? AND deleted_at IS NULL", (i,)).fetchone()
                     elif t == "entity":
                         row = self.con.execute("SELECT namespace FROM entity WHERE id=?", (i,)).fetchone()
                     else:
@@ -1458,7 +1634,9 @@ class CyberBrain:
                 row = self.con.execute("SELECT content FROM kb_chunk WHERE id=?", (i,)).fetchone()
                 text = row["content"] if row else ""
             elif t == "memory_fragment":
-                row = self.con.execute("SELECT content FROM memory_fragments WHERE id=?", (i,)).fetchone()
+                row = self.con.execute(
+                      "SELECT content FROM memory_fragments "
+                      "WHERE id=? AND deleted_at IS NULL", (i,)).fetchone()
                 text = row["content"] if row else ""
             elif t == "entity":
                 row = self.con.execute("SELECT name, org, meta_json FROM entity WHERE id=?", (i,)).fetchone()
@@ -1482,8 +1660,9 @@ class CyberBrain:
         # 外部审查 2026-09-28 点名此处："缺失的 status 谓词位于会话启动的 context builder 中，
         # 而非搜索路径"。context builder 返回散文而非行，所以最容易漏。
         for r in self.con.execute(
-                "SELECT content FROM memory_fragments WHERE status='active' "
-                "AND source_ref LIKE 'iron_rules%' ORDER BY id"):
+                  "SELECT content FROM memory_fragments WHERE status='active' "
+                  "AND deleted_at IS NULL "
+                  "AND source_ref LIKE 'iron_rules%' ORDER BY id"):
             lines.append(f"[铁律] {r['content']}")
         logs = self.con.execute(
             "SELECT title, body FROM content_item WHERE category='工作日志' "
@@ -1538,8 +1717,9 @@ class CyberBrain:
                 lines.append(f"  · {r['title']}（{r['status']}）")
         # ② 最近决策（最近 5 条 decision）—— status 过滤同样不能漏
         dec = self.con.execute(
-            "SELECT content FROM memory_fragments WHERE status='active' "
-            "AND fragment_type='decision' "
+              "SELECT content FROM memory_fragments WHERE status='active' "
+              "AND deleted_at IS NULL "
+              "AND fragment_type='decision' "
             "ORDER BY created_at DESC LIMIT 5").fetchall()
         if dec:
             lines.append("[提醒·最近决策]")
@@ -1547,8 +1727,9 @@ class CyberBrain:
                 lines.append(f"  · {(r['content'] or '')[:70]}")
         # ③ 高价值知识（importance=high，若已启用）—— status 过滤同样不能漏
         hi = self.con.execute(
-            "SELECT content FROM memory_fragments WHERE status='active' "
-            "AND importance='high' "
+              "SELECT content FROM memory_fragments WHERE status='active' "
+              "AND deleted_at IS NULL "
+              "AND importance='high' "
             "ORDER BY created_at DESC LIMIT 5").fetchall()
         if hi:
             lines.append("[提醒·高价值知识]")
@@ -1682,6 +1863,12 @@ def _main(argv=None):
     pf.add_argument("--subject", default="work")
     pf.add_argument("--namespace", default=None,
                     help="记忆分区（默认 default；用于隔离不同用途的记忆）")
+    pf.add_argument("--delete", type=int, metavar="ID",
+                    help="软删除碎片：留墓碑而非物理删除，可用 --restore 恢复（#3）")
+    pf.add_argument("--restore", type=int, metavar="ID",
+                    help="恢复一条已软删除的碎片")
+    pf.add_argument("--deleted", action="store_true",
+                    help="列出已删除的碎片（墓碑）")
     pf.add_argument("--list", action="store_true")
     pf.add_argument("--search")
 
@@ -1700,6 +1887,8 @@ def _main(argv=None):
     pr = sub.add_parser("recall", help="防遗忘：命中记忆碎片+摘要")
     pr.add_argument("query", nargs="?", default=None)
     pr.add_argument("--days", type=int, default=None, help="只召回最近 N 天（时间感知）")
+    pr.add_argument("--namespace", default=None,
+                    help="只召回该记忆分区（默认全部）")
 
     plife = sub.add_parser("lifecycle", help="记忆生命周期管理（P1）")
     plife.add_argument("--audit", action="store_true", help="扫描 importance 缺失/过期事件（只读）")
@@ -1710,9 +1899,21 @@ def _main(argv=None):
     plife.add_argument("--threshold", type=float, default=0.8, help="去重相似度阈值（默认 0.8）")
     plife.add_argument("--unmerge", type=int, metavar="ID",
                        help="撤销合并：把指定碎片恢复为 active")
+    plife.add_argument("--clean-zero-width", action="store_true",
+                       help="清除零宽区间关系（valid_from == valid_until 的死数据，见 #5）")
+    plife.add_argument("--review", action="store_true",
+                       help="列出等待人工确认的碎片（#4）")
+    plife.add_argument("--submit-review", type=int, metavar="ID",
+                       help="把碎片置为待人工确认（pending_review，检索不再返回）")
+    plife.add_argument("--approve", type=int, metavar="ID",
+                       help="人工确认通过：pending_review → active")
+    plife.add_argument("--reject", type=int, metavar="ID",
+                       help="人工确认驳回：pending_review → rejected")
 
     psr = sub.add_parser("search", help="统一搜索")
     psr.add_argument("query")
+    psr.add_argument("--namespace", default=None,
+                     help="只搜该记忆分区（默认搜全部）")
 
     pm = sub.add_parser("master", help="字典")
     pm.add_argument("--add", action="store_true")
@@ -1836,8 +2037,13 @@ def _main(argv=None):
             cid = db.add_conversation(args.title, session_key=args.session)
             print("conv id =", cid)
         elif args.append:
-            db.append_message(args.append, args.role, args.text)
-            print("appended")
+            # 失败要能被看见：会话不存在 / 参数缺失时明确报错并置非零退出码（#13）
+            try:
+                n = db.append_message(args.append, args.role, args.text)
+                print("appended（会话 %s 现共 %d 条消息）" % (args.append, n))
+            except ValueError as e:
+                print("追加失败：%s" % e, file=sys.stderr)
+                sys.exit(1)
         elif args.get:
             r = db.get_conversation(args.get)
             print(r["title"], "|", r["messages_json"][:200]) if r else print("not found")
@@ -1849,6 +2055,21 @@ def _main(argv=None):
             fid = db.add_fragment(args.type, args.content, subject=args.subject,
                                   namespace=getattr(args, "namespace", None))
             print("fragment id =", fid)
+        elif getattr(args, "delete", None) is not None:
+            n = db.delete_fragment(args.delete)
+            if n:
+                print(f"[已删除] #{args.delete} 已标记为墓碑（正文保留，可用 frag --restore {args.delete} 恢复）")
+            else:
+                print(f"#{args.delete} 不存在、或已是删除状态，未改动")
+        elif getattr(args, "restore", None) is not None:
+            n = db.restore_fragment(args.restore)
+            print(f"[已恢复] #{args.restore}" if n else f"#{args.restore} 不是已删除状态，未改动")
+        elif args.deleted:
+            rows = db.list_deleted_fragments()
+            if not rows:
+                print("（无墓碑）")
+            for r in rows:
+                print(r["id"], r["deleted_at"], f"[{r['fragment_type']}]", (r["content"] or "")[:60])
         elif args.list:
             for r in db.list_fragments(args.type):
                 print(r["id"], f"[{r['fragment_type']}]", r["content"][:80])
@@ -1872,7 +2093,7 @@ def _main(argv=None):
             yesterday = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
             cnt = db.con.execute(
                 "SELECT COUNT(*) FROM memory_fragments WHERE fragment_type='event' "
-                "AND status='active' AND created_at LIKE ?", (yesterday + "%",)).fetchone()[0]
+                "AND status='active' AND deleted_at IS NULL AND created_at LIKE ?", (yesterday + "%",)).fetchone()[0]
             if cnt > 0:
                 print(f"✅ 昨天（{yesterday}）已记录 {cnt} 条事件")
             else:
@@ -1899,7 +2120,9 @@ def _main(argv=None):
             print("summary: 需要 --add / --get")
 
     elif args.cmd == "recall":
-        for line in db.recall(args.query, days=args.days):
+        # 透传 namespace（#8）
+        for line in db.recall(args.query, days=args.days,
+                              namespace=getattr(args, "namespace", None)):
             print(line)
 
     elif args.cmd == "lifecycle":
@@ -1910,6 +2133,30 @@ def _main(argv=None):
                 print(f"  过期 {s['age_days']}天 #{s['id']} [{s['type']}] {s['content']}")
             if rep["stale_low"]:
                 print("  提示: 跑 lifecycle --apply 自动降权；跑 lifecycle --dedupe 合并重复")
+        elif args.clean_zero_width:
+            n = db.clean_zero_width_links()
+            print(f"[已清理] 零宽区间关系 {n} 条（valid_from == valid_until 的死数据）")
+        elif args.review:
+            rows = db.list_pending_reviews()
+            if not rows:
+                print("（没有等待确认的碎片）")
+            for r in rows:
+                print(r["id"], f"[{r['fragment_type']}]", (r["content"] or "")[:70],
+                      "| 来源:", r["source_ref"] or "-")
+            if rows:
+                print("  确认：lifecycle --approve <id>  ／ 驳回：lifecycle --reject <id>")
+        elif args.submit_review is not None:
+            n = db.submit_for_review(args.submit_review)
+            print(f"[已提交确认] #{args.submit_review} 现为 pending_review（检索不再返回）"
+                  if n else f"#{args.submit_review} 不是 active 状态（或不存在），未改动")
+        elif args.approve is not None:
+            n = db.approve_fragment(args.approve)
+            print(f"[已通过] #{args.approve} 恢复为 active（重新进入检索）"
+                  if n else f"#{args.approve} 不在待确认状态，未改动")
+        elif args.reject is not None:
+            n = db.reject_fragment(args.reject)
+            print(f"[已驳回] #{args.reject} 标记为 rejected（正文保留，可再次 --submit-review）"
+                  if n else f"#{args.reject} 不在待确认状态，未改动")
         elif args.unmerge is not None:
             n = db.unmerge_fragment(args.unmerge)
             if n:
@@ -1942,7 +2189,8 @@ def _main(argv=None):
             print("lifecycle: 需要 --audit / --dedupe [--apply] / --apply / --unmerge <id>")
 
     elif args.cmd == "search":
-        res = db.search(args.query)
+        # 透传 namespace（#8：底层 search() 一直支持，CLI 这层此前没接）
+        res = db.search(args.query, namespace=getattr(args, "namespace", None))
         for k, v in res.items():
             if not v:
                 continue
