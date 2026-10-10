@@ -207,6 +207,46 @@ try:
 
     # ─────────────────────────────────────────────────────────
     print()
+    print("【4b】AI 会话追加（conv --append 曾经每次必崩）")
+    print("-" * 74)
+    import json as _json
+    import subprocess
+
+    _cv = fresh_db()
+    _cmd = [sys.executable, os.path.join(ROOT, "cyber_brain.py"), "--db", _cv]
+    subprocess.run(_cmd + ["conv", "--add", "--title", "回归测试会话", "--session", "rt-1"],
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+    _r = subprocess.run(
+        _cmd + ["conv", "--append", "1", "--role", "user",
+                "--text", "回归测试：追加这句话"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    _msg = ((_r.stderr or "") + (_r.stdout or "")).strip()
+    check("★ conv --append 不再抛 NameError（_now 未定义的老 bug）",
+          "appended" in (_r.stdout or "") and "NameError" not in (_r.stderr or ""),
+          _msg[:140])
+
+    _cb = CyberBrain(_cv)
+    try:
+        _row = _cb.con.execute(
+            "SELECT messages_json FROM ai_conversation WHERE id=1").fetchone()
+    finally:
+        _cb.con.close()
+    _msgs = _json.loads(_row["messages_json"]) if _row else []
+    check("追加的消息真的落库了（条数、角色、内容都对）",
+          len(_msgs) == 1 and _msgs[0].get("role") == "user"
+          and _msgs[0].get("content") == "回归测试：追加这句话",
+          "实际=%s" % (_msgs,))
+    _at = str(_msgs[0].get("at", "")) if _msgs else ""
+    check("时间戳格式与库内其他时间一致（YYYY-MM-DD HH:MM:SS）",
+          len(_at) == 19 and _at[4] == "-" and _at[10] == " " and _at[13] == ":",
+          "at=%r" % _at)
+    try:
+        os.unlink(_cv)
+    except OSError:
+        pass
+
+    # ─────────────────────────────────────────────────────────
+    print()
     print("【5】schema 完整性")
     print("-" * 74)
     for tbl in ("entity", "content_item", "kb_document", "memory_fragments"):

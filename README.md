@@ -147,7 +147,7 @@ python cyber_brain.py --db cyber_brain.db summary --add --scope work --summary "
 
 # AI 会话落库
 python cyber_brain.py --db cyber_brain.db conv --add --title "会话名" --session 2026-01-01
-python cyber_brain.py --db cyber_brain.db conv --append --id 1 --role user --text "..."
+python cyber_brain.py --db cyber_brain.db conv --append 1 --role user --text "..."
 ```
 
 完整命令：`python cyber_brain.py --help`

@@ -299,6 +299,15 @@ def _parse(s, default):
         return default
 
 
+def _now():
+    """本地时间戳字符串，格式与 SQLite 的 datetime('now','localtime') 保持一致。
+
+    2026-10-09 新增：append_message() 一直在调用 _now()，但这个函数从来没有定义过，
+    `conv --append` 每次都会抛 NameError —— AI 会话追加功能实际不可用。
+    """
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 class CyberBrain:
     def __init__(self, db_path):
         self.db_path = db_path
