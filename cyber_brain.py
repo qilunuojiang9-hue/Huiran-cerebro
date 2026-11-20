@@ -25,7 +25,7 @@ import datetime
 __all__ = ["CyberBrain", "ENTITY_TYPES", "CONTENT_TYPES", "FRAGMENT_TYPES"]
 
 # 版本号单一事实源：改这里，然后跑 tools/check_version.py 同步 README 徽章
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 ENTITY_TYPES = ["person", "org", "project", "account", "platform", "product", "tool", "other"]
 CONTENT_TYPES = ["note", "article", "task", "decision", "meeting", "idea", "issue", "report"]
@@ -1615,7 +1615,10 @@ class CyberBrain:
                         row = self.con.execute("SELECT namespace FROM entity WHERE id=?", (i,)).fetchone()
                     else:
                         row = None
-                    if row and row["namespace"] != namespace:
+                    # row 为 None 有两种情况：目标行已被删除（孤儿向量），或类型未知。
+                    # 两者都不可信 —— 必须排除。旧写法 `if row and ...` 会让孤儿向量
+                    # 直接绕过 namespace 过滤，导致跨分区泄漏（2026-11-20 实测复现）。
+                    if row is None or row["namespace"] != namespace:
                         continue
                 except Exception:
                     continue

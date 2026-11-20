@@ -5,6 +5,86 @@
 
 ---
 
+## [1.9.0] — 2026-11-20
+
+> **隔离修复 + 导出能力**。修掉一个会导致跨命名空间内容泄漏的过滤缺陷，
+> 并新增按命名空间剥离独立库的工具。
+> 按语义化规则记为 **minor**（新增能力，向后兼容；**无数据库结构变更**）。
+
+### 修复：孤儿向量绕过 namespace 过滤
+
+`search_semantic()` 在按 namespace 回源校验时，原来的写法是：
+
+```python
+if row and row["namespace"] != namespace:
+    continue
+```
+
+当目标行**已被删除**（向量残留，即「孤儿向量」）时，`row` 为 `None`，
+`row and ...` 直接短路为假 —— **条件不成立，孤儿向量被放行**。
+
+后果：`search(q, namespace="A")` 返回的 `semantic` 字段里会混入其它分区的内容。
+
+识别特征：泄漏条目的 `text` 为空串（源记录已查不到）。
+实测本机库存在 4 个孤儿向量（`memory_fragment` 2 个 / `content` 2 个），
+正好就是泄漏的那几条。
+
+修复：
+
+```python
+if row is None or row["namespace"] != namespace:
+    continue
+```
+
+即：**查不到源行也一律排除**。孤儿向量本就不该出现在任何检索结果里。
+
+验证结果：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| `search(q, namespace="X")` 的 semantic | 混入 4 条外部内容 | **0 条** |
+| 不带 namespace 的全局检索 | 10 条 | 10 条（不受影响） |
+| 其它分区的正常检索 | 5 条 | 5 条（不受影响） |
+| 测试套件 | — | **87 通过 / 0 失败** |
+
+### 新增：`export_namespace.py` —— 按命名空间剥离独立库
+
+多项目共用一个库时，用 namespace 做逻辑隔离；对外交付或演示时，
+把某个分区单独剥离成一个干净的独立库，不带其它分区的内容。
+
+```bash
+# 预演：只统计各表会导出多少行，不写文件
+python export_namespace.py --namespace ProjectA --out projectA.db
+
+# 实际导出
+python export_namespace.py --namespace ProjectA --out projectA.db --apply
+
+# 附带字典表（一般不需要）
+python export_namespace.py --namespace ProjectA --out projectA.db --apply --with-dict
+```
+
+实现要点：
+
+- 新库用 `CyberBrain()` 初始化，schema / FTS 触发器 / 索引与主库一致；
+- `ATTACH` 源库后 `INSERT ... SELECT`，**保留原主键** → 外键关系天然正确；
+- FTS 由触发器自动同步，无需手工重建；
+- 只导目标 namespace，`kb_chunk` / `entity_link` / `embeddings` 靠父表关联；
+- `sys_profile` 默认不导（含本机个人信息）；
+- 导出后自动自检：跨分区污染、FTS 可用性、孤儿 chunk、文件大小。
+
+> ⚠️ **实现陷阱**：跨库复制**不能**用 `SELECT *`。
+> 老库经过多次 `ALTER TABLE` 后列顺序与新库不同，会导致整体错位
+> （实测中 `namespace` 列拿到了 `created_at` 的值）。
+> 必须用 `PRAGMA table_info` 取两库列交集，显式列出列名。
+
+### 升级说明
+
+- **无需迁移，无需重建索引**（本次无数据库结构变更）。
+- 库中已有的孤儿向量不会自动清除；它们已不影响检索结果，仅占少量空间。
+  如需清理，按 `target_type` 逐类删除「`NOT EXISTS` 对应目标行」的记录即可。
+
+---
+
 ## [1.8.0] — 2026-10-10
 
 > **机制补全版本（收官）**。补上外部审查 7 项 rubric 机制中最后两项，
